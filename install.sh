@@ -3,17 +3,16 @@ set -euo pipefail
 
 # ===================================================================================
 # 优化的 Shadowsocks Rust 管理脚本
-
-# 作者：Gemini
-# 版本：2.8
-# 描述：一个简化且健壮的，用于安装和管理 shadowsocks-rust 的脚本。
+#
+# 作者：yahuisme
+# 版本：3.0
+# 描述：一个经过全面审查和优化的，用于安装和管理 shadowsocks-rust 的健壮脚本。
 # ===================================================================================
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="2.8"
+readonly SCRIPT_VERSION="3.0"
 readonly INSTALL_DIR="/etc/ss-rust"
-readonly BINARY_PATH="/usr/local/bin/ssserver" 
-readonly OLD_BINARY_PATH="/usr/local/bin/ss-rust" 
+readonly BINARY_PATH="/usr/local/bin/ss-rust" 
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
 readonly VERSION_FILE="${INSTALL_DIR}/ver.txt"
 readonly SYSTEMD_SERVICE_FILE="/etc/systemd/system/ss-rust.service"
@@ -128,6 +127,7 @@ download_and_install() {
 
     info "正在解压并安装..."
     tar -xf "/tmp/ss-rust.tar.xz" -C /tmp
+    # 还原：将 ssserver 安装为 ss-rust
     install -m 755 /tmp/ssserver "$BINARY_PATH"
     
     mkdir -p "$INSTALL_DIR"
@@ -140,8 +140,15 @@ download_and_install() {
 generate_config() {
     info "正在生成配置文件..."
     local port
-    read -p "请输入 Shadowsocks 端口 (默认: 8388): " port
-    port=${port:-8388}
+    while true; do
+        read -p "请输入 Shadowsocks 端口 [1-65535] (默认: 8388): " port
+        port=${port:-8388}
+        if [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]]; then
+            break
+        else
+            warn "输入无效，请输入一个 1 到 65535 之间的数字。"
+        fi
+    done
 
     local password
     read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password
@@ -150,21 +157,21 @@ generate_config() {
     info "将使用推荐的加密方式: $method"
     
     if [[ -z "$password" ]]; then
-        # 修正：为 256位 AES 加密方式生成 32 字节的密钥
         info "为 $method 生成 32 字节随机密码..."
         password=$(head -c 32 /dev/urandom | base64)
     fi
     
+    # 还原：使用 --argjson 并默认启用 fast_open
     jq -n \
-        --arg server_port "$port" \
+        --argjson server_port "$port" \
         --arg password "$password" \
         --arg method "$method" \
         '{
             "server": "::",
-            "server_port": ($server_port | tonumber),
+            "server_port": $server_port,
             "password": $password,
             "method": $method,
-            "fast_open": false,
+            "fast_open": true,
             "mode": "tcp_and_udp"
         }' > "$CONFIG_PATH"
     
@@ -202,10 +209,10 @@ manage_service() {
     
     case "$1" in
         start|stop|restart|status)
-            info "正在执行: systemctl $1 ss-rust"
             if [[ "$1" == "status" ]]; then
                 systemctl status ss-rust
             else
+                info "正在执行: systemctl $1 ss-rust"
                 systemctl "$1" ss-rust
             fi
             ;;
@@ -217,7 +224,7 @@ manage_service() {
 
 # --- 面向用户的菜单功能 ---
 do_install() {
-    if [[ -f "$BINARY_PATH" || -f "$OLD_BINARY_PATH" ]]; then
+    if [[ -f "$BINARY_PATH" ]]; then
         warn "检测到 shadowsocks-rust 已安装。如果需要重装，请先运行卸载功能。"
         return
     fi
@@ -268,21 +275,27 @@ do_update() {
 do_uninstall() {
     info "准备卸载 shadowsocks-rust..."
     read -p "您确定要彻底清理 shadowsocks-rust 吗? (y/N): " choice
-    if [[ "$choice" =~ ^[Yy]$ ]]; then
-        info "正在停止并禁用服务..."
-        systemctl stop ss-rust &>/dev/null || true
-        systemctl disable ss-rust &>/dev/null || true
-        info "正在删除相关文件..."
-        rm -f "$BINARY_PATH"
-        rm -f "$OLD_BINARY_PATH"
-        rm -f "$SYSTEMD_SERVICE_FILE"
-        rm -rf "$INSTALL_DIR"
-        info "正在重载 systemd..."
-        systemctl daemon-reload
-        success "shadowsocks-rust 已被彻底卸载。"
-    else
+    if [[ ! "$choice" =~ ^[Yy]$ ]]; then
         info "已取消卸载操作。"
+        return
     fi
+
+    # 还原：卸载逻辑只关心 ss-rust
+    if [[ ! -f "$BINARY_PATH" && ! -d "$INSTALL_DIR" ]]; then
+        warn "未发现任何 shadowsocks-rust 相关文件，无需卸载。"
+        return
+    fi
+    
+    info "正在停止并禁用服务..."
+    systemctl stop ss-rust &>/dev/null || true
+    systemctl disable ss-rust &>/dev/null || true
+    info "正在删除相关文件..."
+    rm -f "$BINARY_PATH"
+    rm -f "$SYSTEMD_SERVICE_FILE"
+    rm -rf "$INSTALL_DIR"
+    info "正在重载 systemd..."
+    systemctl daemon-reload
+    success "shadowsocks-rust 已被彻底卸载。"
 }
 
 view_config() {
@@ -322,10 +335,10 @@ view_config() {
 # --- 主菜单 ---
 main_menu() {
     clear
-    echo -e "${C_GREEN}============================================${C_RESET}"
-    echo -e "  ${C_BLUE}优化的 Shadowsocks-rust 管理脚本${C_RESET}"
-    echo -e "  版本: ${C_YELLOW}${SCRIPT_VERSION}${C_RESET}"
-    echo -e "${C_GREEN}============================================${C_RESET}"
+    echo -e "${C_GREEN}======================================================${C_RESET}"
+    echo -e "      ${C_BLUE}Shadowsocks-rust 管理脚本 (用户偏好版)${C_RESET}"
+    echo -e "      版本: ${C_YELLOW}${SCRIPT_VERSION}${C_RESET}"
+    echo -e "${C_GREEN}======================================================${C_RESET}"
     echo ""
     echo -e "  ${C_YELLOW}1.${C_RESET} 安装 Shadowsocks-rust"
     echo -e "  ${C_YELLOW}2.${C_RESET} 更新 Shadowsocks-rust"
@@ -339,6 +352,17 @@ main_menu() {
     echo -e "  ${C_YELLOW}8.${C_RESET} 查看配置信息"
     echo -e "  ${C_YELLOW}0.${C_RESET} 退出脚本"
     echo ""
+
+    if [[ -f "$BINARY_PATH" ]]; then
+        if systemctl is-active --quiet ss-rust; then
+            echo -e "  当前状态: ${C_GREEN}已安装并正在运行${C_RESET}"
+        else
+            echo -e "  当前状态: ${C_YELLOW}已安装但已停止${C_RESET}"
+        fi
+    else
+        echo -e "  当前状态: ${C_RED}未安装${C_RESET}"
+    fi
+    echo "------------------------------------"
     read -p "请输入您的选项 [0-8]: " choice
 
     case "$choice" in
