@@ -2,15 +2,15 @@
 set -euo pipefail
 
 # ===================================================================================
-# 优化的 Shadowsocks Rust 管理脚本 (纯净版)
+# 优化的 Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：2.1 (中文纯净版)
+# 版本：2.2
 # 描述：一个简化且健壮的，用于安装和管理 shadowsocks-rust 的脚本。
 # ===================================================================================
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="2.1"
+readonly SCRIPT_VERSION="2.2"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -60,7 +60,8 @@ detect_arch() {
 
 check_dependencies() {
     info "正在检查必要的依赖工具..."
-    local dependencies=("curl" "jq" "wget" "qrencode" "tar")
+    # 移除了 qrencode 依赖
+    local dependencies=("curl" "jq" "wget" "tar")
     local os_type="$1"
     local missing_deps=()
 
@@ -272,7 +273,9 @@ view_config() {
     fi
 
     local ip
-    ip=$(curl -s https://api.ipify.org)
+    # 尝试获取公网IP，如果失败则提示
+    ip=$(curl -s --max-time 5 https://api.ipify.org) || ip="<获取IP失败,请手动查询>"
+    
     local port
     port=$(jq -r '.server_port' "$CONFIG_PATH")
     local password
@@ -291,8 +294,7 @@ view_config() {
     echo -e "  ${C_YELLOW}加密方式:${C_RESET}    $method"
     echo "-----------------------------------"
     echo -e "  ${C_GREEN}SS 链接:${C_RESET} $ss_link"
-    echo -e "\n--- 二维码 (请在终端中显示) ---"
-    qrencode -t UTF8 "$ss_link"
+    echo -e "(您可以复制上面的 SS 链接直接导入到客户端)"
 }
 
 # --- 主菜单 ---
@@ -312,7 +314,7 @@ main_menu() {
     echo -e "  ${C_YELLOW}6.${C_RESET} 重启服务"
     echo -e "  ${C_YELLOW}7.${C_RESET} 查看服务状态"
     echo "  ------------------------------------"
-    echo -e "  ${C_YELLOW}8.${C_RESET} 查看配置 / 二维码"
+    echo -e "  ${C_YELLOW}8.${C_RESET} 查看配置信息"
     echo -e "  ${C_YELLOW}0.${C_RESET} 退出脚本"
     echo ""
     read -p "请输入您的选项 [0-8]: " choice
