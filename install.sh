@@ -3,17 +3,17 @@ set -euo pipefail
 
 # ===================================================================================
 # 优化的 Shadowsocks Rust 管理脚本
-#
+
 # 作者：Gemini
-# 版本：2.7
+# 版本：2.8
 # 描述：一个简化且健壮的，用于安装和管理 shadowsocks-rust 的脚本。
 # ===================================================================================
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="2.7"
+readonly SCRIPT_VERSION="2.8"
 readonly INSTALL_DIR="/etc/ss-rust"
-readonly BINARY_PATH="/usr/local/bin/ssserver" # 使用官方名称
-readonly OLD_BINARY_PATH="/usr/local/bin/ss-rust" # 兼容旧脚本的路径，用于清理
+readonly BINARY_PATH="/usr/local/bin/ssserver" 
+readonly OLD_BINARY_PATH="/usr/local/bin/ss-rust" 
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
 readonly VERSION_FILE="${INSTALL_DIR}/ver.txt"
 readonly SYSTEMD_SERVICE_FILE="/etc/systemd/system/ss-rust.service"
@@ -145,15 +145,16 @@ generate_config() {
 
     local password
     read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password
-    if [[ -z "$password" ]]; then
-        password=$(head -c 16 /dev/urandom | base64)
-        info "已为您生成随机密码。"
-    fi
     
     local method="2022-blake3-aes-256-gcm"
     info "将使用推荐的加密方式: $method"
-
-    # 修正：默认禁用 fast_open 以提高兼容性
+    
+    if [[ -z "$password" ]]; then
+        # 修正：为 256位 AES 加密方式生成 32 字节的密钥
+        info "为 $method 生成 32 字节随机密码..."
+        password=$(head -c 32 /dev/urandom | base64)
+    fi
+    
     jq -n \
         --arg server_port "$port" \
         --arg password "$password" \
@@ -265,7 +266,6 @@ do_update() {
 }
 
 do_uninstall() {
-    # 修正：强化卸载功能，清理所有已知路径和文件
     info "准备卸载 shadowsocks-rust..."
     read -p "您确定要彻底清理 shadowsocks-rust 吗? (y/N): " choice
     if [[ "$choice" =~ ^[Yy]$ ]]; then
