@@ -3,16 +3,16 @@ set -euo pipefail
 
 # ===================================================================================
 # 优化的 Shadowsocks Rust 管理脚本
-
+#
 # 作者：yahuisme
-# 版本：2.4
+# 版本：2.6
 # 描述：一个简化且健壮的，用于安装和管理 shadowsocks-rust 的脚本。
 # ===================================================================================
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="2.4"
+readonly SCRIPT_VERSION="2.6"
 readonly INSTALL_DIR="/etc/ss-rust"
-readonly BINARY_PATH="/usr/local/bin/ss-rust"
+readonly BINARY_PATH="/usr/local/bin/ssserver"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
 readonly VERSION_FILE="${INSTALL_DIR}/ver.txt"
 readonly SYSTEMD_SERVICE_FILE="/etc/systemd/system/ss-rust.service"
@@ -60,8 +60,7 @@ detect_arch() {
 
 check_dependencies() {
     info "正在检查必要的依赖工具..."
-    # 修正：添加 xz 作为必要依赖
-    local dependencies=("curl" "jq" "wget" "tar" "xz")
+    local dependencies=("curl" "jq" "wget" "tar" "xz" "hostname")
     local os_type="$1"
     local missing_deps=()
 
@@ -90,18 +89,17 @@ install_dependencies() {
     info "正在安装依赖: ${deps_to_install[*]}"
 
     if [[ "$os_type" == "ubuntu" || "$os_type" == "debian" ]]; then
-        # 修正：智能映射命令到包名，例如 xz 命令在 xz-utils 包中
         local apt_packages=()
         for dep in "${deps_to_install[@]}"; do
             case "$dep" in
                 xz) apt_packages+=("xz-utils") ;;
+                hostname) apt_packages+=("hostname") ;;
                 *) apt_packages+=("$dep") ;;
             esac
         done
         apt-get update
         apt-get install -y "${apt_packages[@]}"
     elif [[ "$os_type" == "centos" ]]; then
-        # CentOS/RHEL 中，命令名通常与包名一致
         yum install -y epel-release &>/dev/null || true
         yum install -y "${deps_to_install[@]}"
     fi
@@ -155,12 +153,12 @@ generate_config() {
     info "将使用推荐的加密方式: $method"
 
     jq -n \
-        --argjson server_port "$port" \
+        --arg server_port "$port" \
         --arg password "$password" \
         --arg method "$method" \
         '{
             "server": "::",
-            "server_port": $server_port,
+            "server_port": ($server_port | tonumber),
             "password": $password,
             "method": $method,
             "fast_open": true,
@@ -266,7 +264,21 @@ do_update() {
 
 do_uninstall() {
     if [[ ! -f "$BINARY_PATH" ]]; then
-        error "shadowsocks-rust 未安装。"
+        warn "shadowsocks-rust 似乎未安装或路径不正确。"
+        read -p "是否尝试强制清理残留文件和服务? (y/N): " choice
+        if [[ "$choice" =~ ^[Yy]$ ]]; then
+            info "正在尝试停止并禁用服务..."
+            systemctl stop ss-rust &>/dev/null || true
+            systemctl disable ss-rust &>/dev/null || true
+            info "正在删除文件..."
+            rm -f "$BINARY_PATH" "/usr/local/bin/ss-rust" "$SYSTEMD_SERVICE_FILE"
+            rm -rf "$INSTALL_DIR"
+            systemctl daemon-reload
+            success "强制清理完成。"
+        else
+            info "已取消卸载。"
+        fi
+        return
     fi
     
     read -p "您确定要完全卸载 shadowsocks-rust 吗? 这会删除所有配置。 (y/N): " choice
@@ -297,15 +309,22 @@ view_config() {
     local method
     method=$(jq -r '.method' "$CONFIG_PATH")
     
+    # --- 新增：获取主机名并生成节点名称 ---
+    local hostname
+    hostname=$(hostname)
+    local node_name="${hostname}-ss2022"
+    
     local encoded_credentials
     encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
-    local ss_link="ss://${encoded_credentials}@${ip}:${port}"
+    # 修正：在链接末尾添加 # 和节点名称
+    local ss_link="ss://${encoded_credentials}@${ip}:${port}#${node_name}"
     
     echo -e "\n--- Shadowsocks 配置信息 ---"
     echo -e "  ${C_YELLOW}服务器地址:${C_RESET}  $ip"
     echo -e "  ${C_YELLOW}端口:${C_RESET}        $port"
     echo -e "  ${C_YELLOW}密码:${C_RESET}        $password"
     echo -e "  ${C_YELLOW}加密方式:${C_RESET}    $method"
+    echo -e "  ${C_YELLOW}节点名称:${C_RESET}    $node_name"
     echo "-----------------------------------"
     echo -e "  ${C_GREEN}SS 链接:${C_RESET} $ss_link"
     echo -e "(您可以复制上面的 SS 链接直接导入到客户端)"
