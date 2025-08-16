@@ -4,15 +4,16 @@ set -euo pipefail
 # ===================================================================================
 # 优化的 Shadowsocks Rust 管理脚本
 #
-# 作者：yahuisme
-# 版本：2.6
+# 作者：Gemini
+# 版本：2.7
 # 描述：一个简化且健壮的，用于安装和管理 shadowsocks-rust 的脚本。
 # ===================================================================================
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="2.6"
+readonly SCRIPT_VERSION="2.7"
 readonly INSTALL_DIR="/etc/ss-rust"
-readonly BINARY_PATH="/usr/local/bin/ssserver"
+readonly BINARY_PATH="/usr/local/bin/ssserver" # 使用官方名称
+readonly OLD_BINARY_PATH="/usr/local/bin/ss-rust" # 兼容旧脚本的路径，用于清理
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
 readonly VERSION_FILE="${INSTALL_DIR}/ver.txt"
 readonly SYSTEMD_SERVICE_FILE="/etc/systemd/system/ss-rust.service"
@@ -152,6 +153,7 @@ generate_config() {
     local method="2022-blake3-aes-256-gcm"
     info "将使用推荐的加密方式: $method"
 
+    # 修正：默认禁用 fast_open 以提高兼容性
     jq -n \
         --arg server_port "$port" \
         --arg password "$password" \
@@ -161,7 +163,7 @@ generate_config() {
             "server_port": ($server_port | tonumber),
             "password": $password,
             "method": $method,
-            "fast_open": true,
+            "fast_open": false,
             "mode": "tcp_and_udp"
         }' > "$CONFIG_PATH"
     
@@ -214,8 +216,8 @@ manage_service() {
 
 # --- 面向用户的菜单功能 ---
 do_install() {
-    if [[ -f "$BINARY_PATH" ]]; then
-        warn "shadowsocks-rust 已安装。如果需要重装，请先卸载。"
+    if [[ -f "$BINARY_PATH" || -f "$OLD_BINARY_PATH" ]]; then
+        warn "检测到 shadowsocks-rust 已安装。如果需要重装，请先运行卸载功能。"
         return
     fi
     
@@ -263,30 +265,19 @@ do_update() {
 }
 
 do_uninstall() {
-    if [[ ! -f "$BINARY_PATH" ]]; then
-        warn "shadowsocks-rust 似乎未安装或路径不正确。"
-        read -p "是否尝试强制清理残留文件和服务? (y/N): " choice
-        if [[ "$choice" =~ ^[Yy]$ ]]; then
-            info "正在尝试停止并禁用服务..."
-            systemctl stop ss-rust &>/dev/null || true
-            systemctl disable ss-rust &>/dev/null || true
-            info "正在删除文件..."
-            rm -f "$BINARY_PATH" "/usr/local/bin/ss-rust" "$SYSTEMD_SERVICE_FILE"
-            rm -rf "$INSTALL_DIR"
-            systemctl daemon-reload
-            success "强制清理完成。"
-        else
-            info "已取消卸载。"
-        fi
-        return
-    fi
-    
-    read -p "您确定要完全卸载 shadowsocks-rust 吗? 这会删除所有配置。 (y/N): " choice
+    # 修正：强化卸载功能，清理所有已知路径和文件
+    info "准备卸载 shadowsocks-rust..."
+    read -p "您确定要彻底清理 shadowsocks-rust 吗? (y/N): " choice
     if [[ "$choice" =~ ^[Yy]$ ]]; then
-        manage_service "stop"
-        systemctl disable ss-rust
-        rm -f "$BINARY_PATH" "$SYSTEMD_SERVICE_FILE"
+        info "正在停止并禁用服务..."
+        systemctl stop ss-rust &>/dev/null || true
+        systemctl disable ss-rust &>/dev/null || true
+        info "正在删除相关文件..."
+        rm -f "$BINARY_PATH"
+        rm -f "$OLD_BINARY_PATH"
+        rm -f "$SYSTEMD_SERVICE_FILE"
         rm -rf "$INSTALL_DIR"
+        info "正在重载 systemd..."
         systemctl daemon-reload
         success "shadowsocks-rust 已被彻底卸载。"
     else
@@ -309,14 +300,12 @@ view_config() {
     local method
     method=$(jq -r '.method' "$CONFIG_PATH")
     
-    # --- 新增：获取主机名并生成节点名称 ---
     local hostname
     hostname=$(hostname)
     local node_name="${hostname}-ss2022"
     
     local encoded_credentials
     encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
-    # 修正：在链接末尾添加 # 和节点名称
     local ss_link="ss://${encoded_credentials}@${ip}:${port}#${node_name}"
     
     echo -e "\n--- Shadowsocks 配置信息 ---"
