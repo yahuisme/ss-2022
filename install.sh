@@ -3,14 +3,14 @@ set -euo pipefail
 
 # ===================================================================================
 # 优化的 Shadowsocks Rust 管理脚本
-#
+
 # 作者：yahuisme
-# 版本：2.3
+# 版本：2.4
 # 描述：一个简化且健壮的，用于安装和管理 shadowsocks-rust 的脚本。
 # ===================================================================================
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="2.3"
+readonly SCRIPT_VERSION="2.4"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -24,7 +24,7 @@ readonly C_GREEN='\033[0;32m'
 readonly C_YELLOW='\033[1;33m'
 readonly C_BLUE='\033[0;34m'
 
-# --- 日志函数 (修正：将提示信息重定向到 stderr, 避免干扰返回值) ---
+# --- 日志函数 ---
 info() { echo -e "${C_BLUE}[信息]${C_RESET} $1" >&2; }
 success() { echo -e "${C_GREEN}[成功]${C_RESET} $1" >&2; }
 warn() { echo -e "${C_YELLOW}[警告]${C_RESET} $1" >&2; }
@@ -60,7 +60,8 @@ detect_arch() {
 
 check_dependencies() {
     info "正在检查必要的依赖工具..."
-    local dependencies=("curl" "jq" "wget" "tar")
+    # 修正：添加 xz 作为必要依赖
+    local dependencies=("curl" "jq" "wget" "tar" "xz")
     local os_type="$1"
     local missing_deps=()
 
@@ -87,25 +88,34 @@ install_dependencies() {
     shift
     local deps_to_install=("$@")
     info "正在安装依赖: ${deps_to_install[*]}"
+
     if [[ "$os_type" == "ubuntu" || "$os_type" == "debian" ]]; then
+        # 修正：智能映射命令到包名，例如 xz 命令在 xz-utils 包中
+        local apt_packages=()
+        for dep in "${deps_to_install[@]}"; do
+            case "$dep" in
+                xz) apt_packages+=("xz-utils") ;;
+                *) apt_packages+=("$dep") ;;
+            esac
+        done
         apt-get update
-        apt-get install -y "${deps_to_install[@]}"
+        apt-get install -y "${apt_packages[@]}"
     elif [[ "$os_type" == "centos" ]]; then
-        yum install -y epel-release
+        # CentOS/RHEL 中，命令名通常与包名一致
+        yum install -y epel-release &>/dev/null || true
         yum install -y "${deps_to_install[@]}"
     fi
 }
+
 
 # --- Shadowsocks 核心功能函数 ---
 get_latest_version() {
     info "正在获取 shadowsocks-rust 的最新版本号..."
     local latest_version
-    # curl 的输出直接用于获取版本号，不包含提示信息
     latest_version=$(curl -s "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -r '.tag_name')
     if [[ -z "$latest_version" ]]; then
         error "获取最新版本失败，请检查网络或稍后再试。"
     fi
-    # echo 的内容是此函数的唯一 stdout 输出，作为返回值
     echo "${latest_version#v}"
 }
 
@@ -192,7 +202,6 @@ manage_service() {
     case "$1" in
         start|stop|restart|status)
             info "正在执行: systemctl $1 ss-rust"
-            # status 命令需要输出到 stdout，所以不使用 info 函数
             if [[ "$1" == "status" ]]; then
                 systemctl status ss-rust
             else
@@ -219,7 +228,6 @@ do_install() {
     local arch
     arch=$(detect_arch)
     
-    # 此处调用 get_latest_version，只会捕获版本号，不会捕获提示信息
     local latest_version
     latest_version=$(get_latest_version)
     
@@ -280,7 +288,6 @@ view_config() {
     fi
 
     local ip
-    # 尝试获取公网IP，如果失败则提示
     ip=$(curl -s --max-time 5 https://api.ipify.org) || ip="<获取IP失败,请手动查询>"
     
     local port
