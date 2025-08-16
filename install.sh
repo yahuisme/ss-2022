@@ -5,12 +5,12 @@ set -euo pipefail
 # 优化的 Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：2.2
+# 版本：2.3
 # 描述：一个简化且健壮的，用于安装和管理 shadowsocks-rust 的脚本。
 # ===================================================================================
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="2.2"
+readonly SCRIPT_VERSION="2.3"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -24,10 +24,10 @@ readonly C_GREEN='\033[0;32m'
 readonly C_YELLOW='\033[1;33m'
 readonly C_BLUE='\033[0;34m'
 
-# --- 日志函数 ---
-info() { echo -e "${C_BLUE}[信息]${C_RESET} $1"; }
-success() { echo -e "${C_GREEN}[成功]${C_RESET} $1"; }
-warn() { echo -e "${C_YELLOW}[警告]${C_RESET} $1"; }
+# --- 日志函数 (修正：将提示信息重定向到 stderr, 避免干扰返回值) ---
+info() { echo -e "${C_BLUE}[信息]${C_RESET} $1" >&2; }
+success() { echo -e "${C_GREEN}[成功]${C_RESET} $1" >&2; }
+warn() { echo -e "${C_YELLOW}[警告]${C_RESET} $1" >&2; }
 error() { echo -e "${C_RED}[错误]${C_RESET} $1" >&2; exit 1; }
 
 # --- 辅助函数 ---
@@ -60,7 +60,6 @@ detect_arch() {
 
 check_dependencies() {
     info "正在检查必要的依赖工具..."
-    # 移除了 qrencode 依赖
     local dependencies=("curl" "jq" "wget" "tar")
     local os_type="$1"
     local missing_deps=()
@@ -101,10 +100,12 @@ install_dependencies() {
 get_latest_version() {
     info "正在获取 shadowsocks-rust 的最新版本号..."
     local latest_version
+    # curl 的输出直接用于获取版本号，不包含提示信息
     latest_version=$(curl -s "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -r '.tag_name')
     if [[ -z "$latest_version" ]]; then
         error "获取最新版本失败，请检查网络或稍后再试。"
     fi
+    # echo 的内容是此函数的唯一 stdout 输出，作为返回值
     echo "${latest_version#v}"
 }
 
@@ -191,7 +192,12 @@ manage_service() {
     case "$1" in
         start|stop|restart|status)
             info "正在执行: systemctl $1 ss-rust"
-            systemctl "$1" ss-rust
+            # status 命令需要输出到 stdout，所以不使用 info 函数
+            if [[ "$1" == "status" ]]; then
+                systemctl status ss-rust
+            else
+                systemctl "$1" ss-rust
+            fi
             ;;
         *)
             error "无效的操作: $1"
@@ -213,6 +219,7 @@ do_install() {
     local arch
     arch=$(detect_arch)
     
+    # 此处调用 get_latest_version，只会捕获版本号，不会捕获提示信息
     local latest_version
     latest_version=$(get_latest_version)
     
@@ -323,9 +330,9 @@ main_menu() {
         1) do_install ;;
         2) do_update ;;
         3) do_uninstall ;;
-        4) manage_service "start" ;;
-        5) manage_service "stop" ;;
-        6) manage_service "restart" ;;
+        4) manage_service "start"; success "启动命令已发送" ;;
+        5) manage_service "stop"; success "停止命令已发送" ;;
+        6) manage_service "restart"; success "重启命令已发送" ;;
         7) manage_service "status" ;;
         8) view_config ;;
         0) exit 0 ;;
