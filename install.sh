@@ -105,7 +105,6 @@ install_dependencies() {
         done
         apt-get update
         apt-get install -y "${apt_packages[@]}"
-    # 修正：在 elif 语句后添加了缺失的 then
     elif [[ "$os_type" == "centos" ]]; then
         yum install -y epel-release &>/dev/null || true
         yum install -y "${deps_to_install[@]}"
@@ -333,7 +332,8 @@ view_config() {
     
     local hostname
     hostname=$(hostname)
-    local node_name="${hostname}-ss2022"
+    # 修正：将节点名称中的 - 替换为空格
+    local node_name="${hostname} ss2022"
     
     local encoded_credentials
     encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
@@ -411,9 +411,7 @@ ss_port=""
 ss_password=""
 run_non_interactive=false
 
-# 使用 getopts 进行更标准的参数解析
 while getopts ":p:w:i-:" opt; do
-    # 支持长选项 --port, --password, --install
     if [ "$opt" = "-" ]; then
         case "${OPTARG}" in
             port)
@@ -451,7 +449,6 @@ while getopts ":p:w:i-:" opt; do
 done
 shift $((OPTIND -1))
 
-# --- 根据模式执行相应操作 ---
 if [[ "$run_non_interactive" == "true" ]]; then
     if [[ -z "$ss_port" || -z "$ss_password" ]]; then
         error "一键安装模式需要同时提供 -p <端口> 和 -w <密码> 参数。"
@@ -487,6 +484,5 @@ if [[ "$run_non_interactive" == "true" ]]; then
     success "--- 一键安装完成 ---"
     exit 0
 else
-    # --- 交互模式 ---
     main_menu
 fi
