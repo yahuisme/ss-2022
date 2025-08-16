@@ -2,15 +2,15 @@
 set -euo pipefail
 
 # ===================================================================================
-# 优化的 Shadowsocks Rust 管理脚本
+# 优化的 Shadowsocks Rust 管理脚本 (纯净版)
 #
 # 作者：yahuisme
-# 版本：2.0 (中文版)
+# 版本：2.1 (中文纯净版)
 # 描述：一个简化且健壮的，用于安装和管理 shadowsocks-rust 的脚本。
 # ===================================================================================
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="2.0"
+readonly SCRIPT_VERSION="2.1"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -295,13 +295,6 @@ view_config() {
     qrencode -t UTF8 "$ss_link"
 }
 
-install_shadowtls() {
-    info "准备安装 ShadowTLS..."
-    info "将使用官方脚本进行安装，请遵循其指引完成后续配置。"
-    bash <(curl -fsSL https://raw.githubusercontent.com/ihciah/shadow-tls/main/scripts/install.sh)
-    success "ShadowTLS 官方安装脚本执行完毕。"
-}
-
 # --- 主菜单 ---
 main_menu() {
     clear
@@ -320,10 +313,9 @@ main_menu() {
     echo -e "  ${C_YELLOW}7.${C_RESET} 查看服务状态"
     echo "  ------------------------------------"
     echo -e "  ${C_YELLOW}8.${C_RESET} 查看配置 / 二维码"
-    echo -e "  ${C_YELLOW}9.${C_RESET} 安装/管理 ShadowTLS"
     echo -e "  ${C_YELLOW}0.${C_RESET} 退出脚本"
     echo ""
-    read -p "请输入您的选项 [0-9]: " choice
+    read -p "请输入您的选项 [0-8]: " choice
 
     case "$choice" in
         1) do_install ;;
@@ -334,7 +326,6 @@ main_menu() {
         6) manage_service "restart" ;;
         7) manage_service "status" ;;
         8) view_config ;;
-        9) install_shadowtls ;;
         0) exit 0 ;;
         *) error "无效的选项，请输入正确的数字。" ;;
     esac
