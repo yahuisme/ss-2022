@@ -10,7 +10,7 @@ set -euo pipefail
 # ===================================================================================
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="3.1"
+readonly SCRIPT_VERSION="3.0"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust" 
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -71,7 +71,6 @@ check_dependencies() {
     done
 
     if [[ ${#missing_deps[@]} -gt 0 ]]; then
-        # 在非交互模式下，直接尝试安装
         if [[ "${non_interactive:-false}" == "true" ]]; then
             info "检测到依赖缺失，将在非交互模式下自动安装..."
             install_dependencies "$os_type" "${missing_deps[@]}"
@@ -106,7 +105,8 @@ install_dependencies() {
         done
         apt-get update
         apt-get install -y "${apt_packages[@]}"
-    elif [[ "$os_type" == "centos" ]];
+    # 修正：在 elif 语句后添加了缺失的 then
+    elif [[ "$os_type" == "centos" ]]; then
         yum install -y epel-release &>/dev/null || true
         yum install -y "${deps_to_install[@]}"
     fi
@@ -143,7 +143,6 @@ download_and_install() {
     success "shadowsocks-rust v${version} 安装成功。"
 }
 
-# 修改：函数现在可以接受参数，实现非交互式配置
 generate_config() {
     local port=${1:-}
     local password=${2:-}
@@ -270,7 +269,7 @@ do_install_interactive() {
     latest_version=$(get_latest_version)
     
     download_and_install "$latest_version" "$arch"
-    generate_config # 调用无参数版本，进行交互式提问
+    generate_config
     create_systemd_service
     manage_service "start"
     
@@ -340,7 +339,6 @@ view_config() {
     encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
     local ss_link="ss://${encoded_credentials}@${ip}:${port}#${node_name}"
     
-    # 将输出重定向到 stderr，避免在非交互模式下干扰可能的脚本输出
     {
         echo -e "\n--- Shadowsocks 配置信息 ---"
         echo -e "  ${C_YELLOW}服务器地址:${C_RESET}  $ip"
@@ -406,7 +404,6 @@ main_menu() {
 }
 
 # --- 脚本入口 ---
-# 全局检查 root 权限
 check_root
 
 # --- 参数解析与模式选择 ---
@@ -414,37 +411,53 @@ ss_port=""
 ss_password=""
 run_non_interactive=false
 
-# 使用长选项 --port, --password, --install
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        -p|--port)
-            ss_port="$2"
-            shift 2
-            ;;
-        -w|--password)
-            ss_password="$2"
-            shift 2
-            ;;
-        -i|--install)
-            run_non_interactive=true
-            shift
-            ;;
-        *)
-            # 如果遇到未知参数，则假定进入交互模式
-            main_menu
-            exit 0
-            ;;
-    esac
+# 使用 getopts 进行更标准的参数解析
+while getopts ":p:w:i-:" opt; do
+    # 支持长选项 --port, --password, --install
+    if [ "$opt" = "-" ]; then
+        case "${OPTARG}" in
+            port)
+                ss_port="${!OPTIND}"; OPTIND=$((OPTIND + 1))
+                ;;
+            password)
+                ss_password="${!OPTIND}"; OPTIND=$((OPTIND + 1))
+                ;;
+            install)
+                run_non_interactive=true
+                ;;
+            *)
+                error "不支持的长选项: --${OPTARG}"
+                ;;
+        esac
+    else
+        case "$opt" in
+            p)
+                ss_port="$OPTARG"
+                ;;
+            w)
+                ss_password="$OPTARG"
+                ;;
+            i)
+                run_non_interactive=true
+                ;;
+            \?)
+                error "无效的选项: -$OPTARG"
+                ;;
+            :)
+                error "选项 -$OPTARG 需要一个参数。"
+                ;;
+        esac
+    fi
 done
+shift $((OPTIND -1))
 
 # --- 根据模式执行相应操作 ---
 if [[ "$run_non_interactive" == "true" ]]; then
-    # --- 非交互模式 ---
     if [[ -z "$ss_port" || -z "$ss_password" ]]; then
         error "一键安装模式需要同时提供 -p <端口> 和 -w <密码> 参数。"
     fi
     
-    non_interactive=true # 设置全局标志，用于依赖安装
+    non_interactive=true
     info "--- 进入一键安装模式 ---"
     
     info "步骤 1/7: 清理旧版本..."
