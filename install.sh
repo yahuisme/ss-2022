@@ -10,7 +10,7 @@ set -euo pipefail
 # ===================================================================================
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="3.0"
+readonly SCRIPT_VERSION="3.1"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust" 
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -71,12 +71,18 @@ check_dependencies() {
     done
 
     if [[ ${#missing_deps[@]} -gt 0 ]]; then
-        warn "检测到以下依赖缺失: ${missing_deps[*]}"
-        read -p "是否需要现在自动安装它们? (y/N): " choice
-        if [[ "$choice" =~ ^[Yy]$ ]]; then
+        # 在非交互模式下，直接尝试安装
+        if [[ "${non_interactive:-false}" == "true" ]]; then
+            info "检测到依赖缺失，将在非交互模式下自动安装..."
             install_dependencies "$os_type" "${missing_deps[@]}"
         else
-            error "缺少必要的依赖，脚本无法继续运行。"
+            warn "检测到以下依赖缺失: ${missing_deps[*]}"
+            read -p "是否需要现在自动安装它们? (y/N): " choice
+            if [[ "$choice" =~ ^[Yy]$ ]]; then
+                install_dependencies "$os_type" "${missing_deps[@]}"
+            else
+                error "缺少必要的依赖，脚本无法继续运行。"
+            fi
         fi
     fi
     success "所有依赖均已满足。"
@@ -89,6 +95,7 @@ install_dependencies() {
     info "正在安装依赖: ${deps_to_install[*]}"
 
     if [[ "$os_type" == "ubuntu" || "$os_type" == "debian" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
         local apt_packages=()
         for dep in "${deps_to_install[@]}"; do
             case "$dep" in
@@ -99,7 +106,7 @@ install_dependencies() {
         done
         apt-get update
         apt-get install -y "${apt_packages[@]}"
-    elif [[ "$os_type" == "centos" ]]; then
+    elif [[ "$os_type" == "centos" ]];
         yum install -y epel-release &>/dev/null || true
         yum install -y "${deps_to_install[@]}"
     fi
@@ -127,7 +134,6 @@ download_and_install() {
 
     info "正在解压并安装..."
     tar -xf "/tmp/ss-rust.tar.xz" -C /tmp
-    # 还原：将 ssserver 安装为 ss-rust
     install -m 755 /tmp/ssserver "$BINARY_PATH"
     
     mkdir -p "$INSTALL_DIR"
@@ -137,31 +143,41 @@ download_and_install() {
     success "shadowsocks-rust v${version} 安装成功。"
 }
 
+# 修改：函数现在可以接受参数，实现非交互式配置
 generate_config() {
-    info "正在生成配置文件..."
-    local port
-    while true; do
-        read -p "请输入 Shadowsocks 端口 [1-65535] (默认: 8388): " port
-        port=${port:-8388}
-        if [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]]; then
-            break
-        else
-            warn "输入无效，请输入一个 1 到 65535 之间的数字。"
-        fi
-    done
+    local port=${1:-}
+    local password=${2:-}
 
-    local password
-    read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password
+    info "正在生成配置文件..."
     
-    local method="2022-blake3-aes-256-gcm"
-    info "将使用推荐的加密方式: $method"
-    
-    if [[ -z "$password" ]]; then
-        info "为 $method 生成 32 字节随机密码..."
-        password=$(head -c 32 /dev/urandom | base64)
+    if [[ -z "$port" ]]; then
+      while true; do
+          read -p "请输入 Shadowsocks 端口 [1-65535] (默认: 8388): " port
+          port=${port:-8388}
+          if [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]]; then
+              break
+          else
+              warn "输入无效，请输入一个 1 到 65535 之间的数字。"
+          fi
+      done
+    else
+      info "使用指定的端口: $port"
     fi
     
-    # 还原：使用 --argjson 并默认启用 fast_open
+    local method="2022-blake3-aes-256-gcm"
+    
+    if [[ -z "$password" ]]; then
+      read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input
+      if [[ -z "$password_input" ]]; then
+        info "为 $method 生成 32 字节随机密码..."
+        password=$(head -c 32 /dev/urandom | base64)
+      else
+        password=$password_input
+      fi
+    else
+      info "使用指定的密码。"
+    fi
+    
     jq -n \
         --argjson server_port "$port" \
         --arg password "$password" \
@@ -222,8 +238,22 @@ manage_service() {
     esac
 }
 
+# --- 核心卸载逻辑 ---
+run_uninstall_logic() {
+    info "正在停止并禁用服务..."
+    systemctl stop ss-rust &>/dev/null || true
+    systemctl disable ss-rust &>/dev/null || true
+    info "正在删除相关文件..."
+    rm -f "$BINARY_PATH" "/usr/local/bin/ssserver"
+    rm -f "$SYSTEMD_SERVICE_FILE"
+    rm -rf "$INSTALL_DIR"
+    info "正在重载 systemd..."
+    systemctl daemon-reload
+    success "清理完成。"
+}
+
 # --- 面向用户的菜单功能 ---
-do_install() {
+do_install_interactive() {
     if [[ -f "$BINARY_PATH" ]]; then
         warn "检测到 shadowsocks-rust 已安装。如果需要重装，请先运行卸载功能。"
         return
@@ -240,7 +270,7 @@ do_install() {
     latest_version=$(get_latest_version)
     
     download_and_install "$latest_version" "$arch"
-    generate_config
+    generate_config # 调用无参数版本，进行交互式提问
     create_systemd_service
     manage_service "start"
     
@@ -272,7 +302,7 @@ do_update() {
     success "更新完成。"
 }
 
-do_uninstall() {
+do_uninstall_interactive() {
     info "准备卸载 shadowsocks-rust..."
     read -p "您确定要彻底清理 shadowsocks-rust 吗? (y/N): " choice
     if [[ ! "$choice" =~ ^[Yy]$ ]]; then
@@ -280,22 +310,11 @@ do_uninstall() {
         return
     fi
 
-    # 还原：卸载逻辑只关心 ss-rust
     if [[ ! -f "$BINARY_PATH" && ! -d "$INSTALL_DIR" ]]; then
         warn "未发现任何 shadowsocks-rust 相关文件，无需卸载。"
         return
     fi
-    
-    info "正在停止并禁用服务..."
-    systemctl stop ss-rust &>/dev/null || true
-    systemctl disable ss-rust &>/dev/null || true
-    info "正在删除相关文件..."
-    rm -f "$BINARY_PATH"
-    rm -f "$SYSTEMD_SERVICE_FILE"
-    rm -rf "$INSTALL_DIR"
-    info "正在重载 systemd..."
-    systemctl daemon-reload
-    success "shadowsocks-rust 已被彻底卸载。"
+    run_uninstall_logic
 }
 
 view_config() {
@@ -321,22 +340,25 @@ view_config() {
     encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
     local ss_link="ss://${encoded_credentials}@${ip}:${port}#${node_name}"
     
-    echo -e "\n--- Shadowsocks 配置信息 ---"
-    echo -e "  ${C_YELLOW}服务器地址:${C_RESET}  $ip"
-    echo -e "  ${C_YELLOW}端口:${C_RESET}        $port"
-    echo -e "  ${C_YELLOW}密码:${C_RESET}        $password"
-    echo -e "  ${C_YELLOW}加密方式:${C_RESET}    $method"
-    echo -e "  ${C_YELLOW}节点名称:${C_RESET}    $node_name"
-    echo "-----------------------------------"
-    echo -e "  ${C_GREEN}SS 链接:${C_RESET} $ss_link"
-    echo -e "(您可以复制上面的 SS 链接直接导入到客户端)"
+    # 将输出重定向到 stderr，避免在非交互模式下干扰可能的脚本输出
+    {
+        echo -e "\n--- Shadowsocks 配置信息 ---"
+        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}  $ip"
+        echo -e "  ${C_YELLOW}端口:${C_RESET}        $port"
+        echo -e "  ${C_YELLOW}密码:${C_RESET}        $password"
+        echo -e "  ${C_YELLOW}加密方式:${C_RESET}    $method"
+        echo -e "  ${C_YELLOW}节点名称:${C_RESET}    $node_name"
+        echo "-----------------------------------"
+        echo -e "  ${C_GREEN}SS 链接:${C_RESET} $ss_link"
+        echo -e "(您可以复制上面的 SS 链接直接导入到客户端)"
+    } >&2
 }
 
 # --- 主菜单 ---
 main_menu() {
     clear
     echo -e "${C_GREEN}======================================================${C_RESET}"
-    echo -e "      ${C_BLUE}Shadowsocks-rust 管理脚本 (用户偏好版)${C_RESET}"
+    echo -e "      ${C_BLUE}Shadowsocks-rust 管理脚本${C_RESET}"
     echo -e "      版本: ${C_YELLOW}${SCRIPT_VERSION}${C_RESET}"
     echo -e "${C_GREEN}======================================================${C_RESET}"
     echo ""
@@ -366,9 +388,9 @@ main_menu() {
     read -p "请输入您的选项 [0-8]: " choice
 
     case "$choice" in
-        1) do_install ;;
+        1) do_install_interactive ;;
         2) do_update ;;
-        3) do_uninstall ;;
+        3) do_uninstall_interactive ;;
         4) manage_service "start"; success "启动命令已发送" ;;
         5) manage_service "stop"; success "停止命令已发送" ;;
         6) manage_service "restart"; success "重启命令已发送" ;;
@@ -384,5 +406,74 @@ main_menu() {
 }
 
 # --- 脚本入口 ---
+# 全局检查 root 权限
 check_root
-main_menu
+
+# --- 参数解析与模式选择 ---
+ss_port=""
+ss_password=""
+run_non_interactive=false
+
+# 使用长选项 --port, --password, --install
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -p|--port)
+            ss_port="$2"
+            shift 2
+            ;;
+        -w|--password)
+            ss_password="$2"
+            shift 2
+            ;;
+        -i|--install)
+            run_non_interactive=true
+            shift
+            ;;
+        *)
+            # 如果遇到未知参数，则假定进入交互模式
+            main_menu
+            exit 0
+            ;;
+    esac
+done
+
+# --- 根据模式执行相应操作 ---
+if [[ "$run_non_interactive" == "true" ]]; then
+    # --- 非交互模式 ---
+    if [[ -z "$ss_port" || -z "$ss_password" ]]; then
+        error "一键安装模式需要同时提供 -p <端口> 和 -w <密码> 参数。"
+    fi
+    
+    non_interactive=true # 设置全局标志，用于依赖安装
+    info "--- 进入一键安装模式 ---"
+    
+    info "步骤 1/7: 清理旧版本..."
+    run_uninstall_logic
+    
+    info "步骤 2/7: 环境检测..."
+    os_type=$(detect_os)
+    check_dependencies "$os_type"
+    arch=$(detect_arch)
+    
+    info "步骤 3/7: 获取最新版本..."
+    latest_version=$(get_latest_version)
+    
+    info "步骤 4/7: 下载并安装..."
+    download_and_install "$latest_version" "$arch"
+    
+    info "步骤 5/7: 生成配置文件..."
+    generate_config "$ss_port" "$ss_password"
+    
+    info "步骤 6/7: 创建并启动服务..."
+    create_systemd_service
+    manage_service "start"
+    
+    info "步骤 7/7: 显示最终配置..."
+    view_config
+    
+    success "--- 一键安装完成 ---"
+    exit 0
+else
+    # --- 交互模式 ---
+    main_menu
+fi
