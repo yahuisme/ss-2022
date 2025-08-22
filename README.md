@@ -8,5 +8,5 @@ bash <(curl -sL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.
 
 ## 无交互一键安装
 ```
-bash <(curl -sL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) -p 12345 -w 'R4N5fDtDcmuDZ-mWdaZyTA'
+bash <(curl -sL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) -p 12345 -w 'X3Z7Cp6YoxFvjD1dS+Gy4w=='
 ```
