@@ -5,20 +5,19 @@
 # Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：3.3
+# 版本：3.4
 # 描述：一个安全、健壮的 shadowsocks-rust 管理脚本。
 # 本版本特性:
-# 1. 默认并固定使用 2022-blake3-aes-128-gcm 加密。
+# 1. 固定使用 2022-blake3-aes-128-gcm 加密。
 # 2. 使用 openssl 生成符合密码长度的随机密钥 (16字节)。
 # 3. 使用 mktemp 创建安全的临时目录，并通过 trap 机制确保脚本退出时自动清理。
-# 4. 对分享链接中的节点名进行 URL 编码，提高客户端兼容性。
-# 5. 简化了非交互式安装的触发逻辑。
+# 4. 简化了非交互式安装的触发逻辑。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="3.3"
+readonly SCRIPT_VERSION="3.4"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -179,7 +178,6 @@ generate_config() {
         read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input
         if [[ -z "$password_input" ]]; then
             info "为 ${ENCRYPTION_METHOD} 生成 16 字节随机密码..."
-            # 128-gcm 需要 16 字节的密钥
             password=$(openssl rand -base64 16)
         else
             password=$password_input
@@ -340,12 +338,11 @@ view_config() {
     password=$(jq -r '.password' "$CONFIG_PATH")
     method=$(jq -r '.method' "$CONFIG_PATH")
 
-    local node_name=$(hostname)
-    local encoded_node_name=$(jq -sRr @uri <<< "${node_name} ss-128")
+    local node_name="$(hostname) ss2022"
 
     local encoded_credentials
     encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
-    local ss_link="ss://${encoded_credentials}@${ip}:${port}#${encoded_node_name}"
+    local ss_link="ss://${encoded_credentials}@${ip}:${port}#${node_name}"
 
     {
         echo -e "\n--- Shadowsocks 配置信息 ---"
