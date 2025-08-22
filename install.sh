@@ -5,19 +5,20 @@
 # Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：3.5
+# 版本：3.7
 # 描述：一个安全、健壮的 shadowsocks-rust 管理脚本。
 # 本版本特性:
-# 1. 在非交互模式下，对用户提供的自定义密码进行严格的格式验证。
-# 2. 固定使用 2022-blake3-aes-128-gcm 加密，性能更优。
-# 3. 使用 openssl 生成符合密码长度的随机密钥 (16字节)。
-# 4. 使用 mktemp 创建安全的临时目录，并通过 trap 机制确保脚本退出时自动清理。
+# 1. 健壮的公网IP获取逻辑，优先获取IPv4，失败后备用IPv6。
+# 2. 在非交互模式下，对用户提供的自定义密码进行严格的格式验证。
+# 3. 固定使用 2022-blake3-aes-128-gcm 加密，性能更优。
+# 4. 使用 openssl 生成符合密码长度的随机密钥 (16字节)。
+# 5. 使用 mktemp 创建安全的临时目录，并通过 trap 机制确保脚本退出时自动清理。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="3.5"
+readonly SCRIPT_VERSION="3.7"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -53,6 +54,35 @@ check_root() {
         error "此脚本必须以 root 权限运行，请使用 sudo。"
     fi
 }
+
+# --- 健壮的公网IP获取函数 (IPv4优先) ---
+get_public_ip() {
+    info "正在查询公网IP地址..."
+    local ip
+    # 优先尝试获取 IPv4 地址
+    ip=$(curl -s -4 --max-time 5 https://api.ipify.org) || \
+    ip=$(curl -s -4 --max-time 5 https://ip.sb)
+
+    if [[ -n "$ip" ]]; then
+        echo "$ip"
+        success "成功获取公网 IPv4 地址。"
+        return
+    fi
+    
+    warn "未能获取公网 IPv4 地址，正在尝试获取 IPv6..."
+    # 如果获取 IPv4 失败，则尝试获取 IPv6 地址
+    ip=$(curl -s -6 --max-time 5 https://api64.ipify.org) || \
+    ip=$(curl -s -6 --max-time 5 https://ip.sb)
+
+    if [[ -n "$ip" ]]; then
+        # 如果是IPv6地址，需要用方括号包裹
+        echo "[$ip]"
+        success "成功获取公网 IPv6 地址。"
+    else
+        error "无法获取公网IP地址，请检查网络连接。"
+    fi
+}
+
 
 detect_os() {
     if grep -qs "ubuntu" /etc/os-release; then
@@ -185,11 +215,10 @@ generate_config() {
         fi
     else
         info "使用指定的密码。"
-        # --- 新增：密码验证逻辑 ---
+        # --- 密码验证逻辑 ---
         if [[ "${non_interactive:-false}" == "true" ]]; then
             info "正在验证密码格式..."
             local decoded_len
-            # 尝试解码并计算字节数，忽略解码错误
             decoded_len=$(echo "$password" | openssl base64 -d -A 2>/dev/null | wc -c)
             if [[ "$decoded_len" -ne "$KEY_BYTES" ]]; then
                 error "密码验证失败！提供的密码 '${password}' 不是一个有效的 Base64 字符串，或者解码后的密钥长度不是 ${KEY_BYTES} 字节。"
@@ -344,8 +373,11 @@ view_config() {
         error "找不到配置文件，请先执行安装。"
     fi
 
-    local ip port password method
-    ip=$(curl -s --max-time 5 https://api.ipify.org) || ip="<获取IP失败,请手动查询>"
+    # 使用新的健壮的IP获取函数
+    local ip_address
+    ip_address=$(get_public_ip)
+    
+    local port password method
     port=$(jq -r '.server_port' "$CONFIG_PATH")
     password=$(jq -r '.password' "$CONFIG_PATH")
     method=$(jq -r '.method' "$CONFIG_PATH")
@@ -354,11 +386,11 @@ view_config() {
 
     local encoded_credentials
     encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
-    local ss_link="ss://${encoded_credentials}@${ip}:${port}#${node_name}"
+    local ss_link="ss://${encoded_credentials}@${ip_address}:${port}#${node_name}"
 
     {
         echo -e "\n--- Shadowsocks 配置信息 ---"
-        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}  $ip"
+        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}  $ip_address"
         echo -e "  ${C_YELLOW}端口:${C_RESET}        $port"
         echo -e "  ${C_YELLOW}密码:${C_RESET}        $password"
         echo -e "  ${C_YELLOW}加密方式:${C_RESET}    $method"
