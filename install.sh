@@ -5,25 +5,26 @@
 # Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：3.4
+# 版本：3.5
 # 描述：一个安全、健壮的 shadowsocks-rust 管理脚本。
 # 本版本特性:
-# 1. 固定使用 2022-blake3-aes-128-gcm 加密。
-# 2. 使用 openssl 生成符合密码长度的随机密钥 (16字节)。
-# 3. 使用 mktemp 创建安全的临时目录，并通过 trap 机制确保脚本退出时自动清理。
-# 4. 简化了非交互式安装的触发逻辑。
+# 1. 在非交互模式下，对用户提供的自定义密码进行严格的格式验证。
+# 2. 固定使用 2022-blake3-aes-128-gcm 加密，性能更优。
+# 3. 使用 openssl 生成符合密码长度的随机密钥 (16字节)。
+# 4. 使用 mktemp 创建安全的临时目录，并通过 trap 机制确保脚本退出时自动清理。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="3.4"
+readonly SCRIPT_VERSION="3.5"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
 readonly VERSION_FILE="${INSTALL_DIR}/ver.txt"
 readonly SYSTEMD_SERVICE_FILE="/etc/systemd/system/ss-rust.service"
 readonly ENCRYPTION_METHOD="2022-blake3-aes-128-gcm"
+readonly KEY_BYTES=16
 
 # --- 颜色定义 ---
 readonly C_RESET='\033[0m'
@@ -177,13 +178,24 @@ generate_config() {
     if [[ -z "$password" ]]; then
         read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input
         if [[ -z "$password_input" ]]; then
-            info "为 ${ENCRYPTION_METHOD} 生成 16 字节随机密码..."
-            password=$(openssl rand -base64 16)
+            info "为 ${ENCRYPTION_METHOD} 生成 ${KEY_BYTES} 字节随机密码..."
+            password=$(openssl rand -base64 ${KEY_BYTES})
         else
             password=$password_input
         fi
     else
         info "使用指定的密码。"
+        # --- 新增：密码验证逻辑 ---
+        if [[ "${non_interactive:-false}" == "true" ]]; then
+            info "正在验证密码格式..."
+            local decoded_len
+            # 尝试解码并计算字节数，忽略解码错误
+            decoded_len=$(echo "$password" | openssl base64 -d -A 2>/dev/null | wc -c)
+            if [[ "$decoded_len" -ne "$KEY_BYTES" ]]; then
+                error "密码验证失败！提供的密码 '${password}' 不是一个有效的 Base64 字符串，或者解码后的密钥长度不是 ${KEY_BYTES} 字节。"
+            fi
+            success "密码格式正确。"
+        fi
     fi
 
     jq -n \
