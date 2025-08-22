@@ -365,7 +365,7 @@ main_menu() {
         clear
         echo -e "${C_GREEN}======================================================${C_RESET}"
         echo -e "      ${C_BLUE}Shadowsocks-rust 管理脚本${C_RESET}"
-        echo -e "      版本: ${C_YELLOW}${SCRIPT_VERSION}${C_RESET} (${ENCRYPTION_METHOD})"
+        echo -e "      版本: ${C_YELLOW}${SCRIPT_VERSION}${C_RESET}"
         echo -e "${C_GREEN}======================================================${C_RESET}"
         echo ""
         echo -e "  ${C_YELLOW}1.${C_RESET} 安装 Shadowsocks-rust"
