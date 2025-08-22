@@ -177,7 +177,8 @@ generate_config() {
 
     if [[ -z "$password" ]]; then
         read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input
-        if [[ -z "$password_input" ]]; info "为 ${ENCRYPTION_METHOD} 生成 16 字节随机密码..."
+        if [[ -z "$password_input" ]]; then
+            info "为 ${ENCRYPTION_METHOD} 生成 16 字节随机密码..."
             # 128-gcm 需要 16 字节的密钥
             password=$(openssl rand -base64 16)
         else
@@ -340,7 +341,6 @@ view_config() {
     method=$(jq -r '.method' "$CONFIG_PATH")
 
     local node_name=$(hostname)
-    # 使用 jq 进行 URL 编码，确保兼容性
     local encoded_node_name=$(jq -sRr @uri <<< "${node_name} ss-128")
 
     local encoded_credentials
