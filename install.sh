@@ -5,20 +5,14 @@
 # Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：3.7
+# 版本：3.8
 # 描述：一个安全、健壮的 shadowsocks-rust 管理脚本。
-# 本版本特性:
-# 1. 健壮的公网IP获取逻辑，优先获取IPv4，失败后备用IPv6。
-# 2. 在非交互模式下，对用户提供的自定义密码进行严格的格式验证。
-# 3. 固定使用 2022-blake3-aes-128-gcm 加密，性能更优。
-# 4. 使用 openssl 生成符合密码长度的随机密钥 (16字节)。
-# 5. 使用 mktemp 创建安全的临时目录，并通过 trap 机制确保脚本退出时自动清理。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="3.7"
+readonly SCRIPT_VERSION="3.8"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -122,8 +116,12 @@ check_dependencies() {
         if [[ "${non_interactive:-false}" == "true" ]]; then
             info "将在非交互模式下自动安装..."
         else
-            read -p "是否需要现在自动安装它们? (y/N): " choice
-            [[ "$choice" =~ ^[Yy]$ ]] || error "缺少必要的依赖，脚本无法继续运行。"
+            # --- MODIFICATION START ---
+            read -p "是否需要现在自动安装它们? (Y/n): " choice
+            if [[ "$choice" =~ ^[Nn]$ ]]; then
+                error "缺少必要的依赖，脚本无法继续运行。"
+            fi
+            # --- MODIFICATION END ---
         fi
         install_dependencies "$os_type" "${missing_deps[@]}"
     fi
@@ -359,11 +357,13 @@ do_uninstall() {
         return
     fi
 
-    read -p "您确定要彻底清理 shadowsocks-rust 吗? (y/N): " choice
-    if [[ ! "$choice" =~ ^[Yy]$ ]]; then
+    # --- MODIFICATION START ---
+    read -p "您确定要彻底清理 shadowsocks-rust 吗? (Y/n): " choice
+    if [[ "$choice" =~ ^[Nn]$ ]]; then
         info "已取消卸载操作。"
         return
     fi
+    # --- MODIFICATION END ---
 
     run_uninstall_logic
 }
@@ -390,10 +390,10 @@ view_config() {
 
     {
         echo -e "\n--- Shadowsocks 配置信息 ---"
-        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}  $ip_address"
-        echo -e "  ${C_YELLOW}端口:${C_RESET}        $port"
-        echo -e "  ${C_YELLOW}密码:${C_RESET}        $password"
-        echo -e "  ${C_YELLOW}加密方式:${C_RESET}    $method"
+        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}   $ip_address"
+        echo -e "  ${C_YELLOW}端口:${C_RESET}         $port"
+        echo -e "  ${C_YELLOW}密码:${C_RESET}         $password"
+        echo -e "  ${C_YELLOW}加密方式:${C_RESET}     $method"
         echo "-----------------------------------"
         echo -e "  ${C_GREEN}SS 链接:${C_RESET} $ss_link"
         echo -e "(您可以复制上面的 SS 链接直接导入到客户端)"
@@ -405,8 +405,8 @@ main_menu() {
     while true; do
         clear
         echo -e "${C_GREEN}======================================================${C_RESET}"
-        echo -e "      ${C_BLUE}Shadowsocks-rust 管理脚本${C_RESET}"
-        echo -e "      版本: ${C_YELLOW}${SCRIPT_VERSION}${C_RESET}"
+        echo -e "           ${C_BLUE}Shadowsocks-rust 管理脚本${C_RESET}"
+        echo -e "           版本: ${C_YELLOW}${SCRIPT_VERSION}${C_RESET}"
         echo -e "${C_GREEN}======================================================${C_RESET}"
         echo ""
         echo -e "  ${C_YELLOW}1.${C_RESET} 安装 Shadowsocks-rust"
