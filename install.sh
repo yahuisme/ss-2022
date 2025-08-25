@@ -5,14 +5,14 @@
 # Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：3.9
+# 版本：4.0
 # 描述：一个安全、健壮的 shadowsocks-rust 管理脚本。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="3.9"
+readonly SCRIPT_VERSION="4.0"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -390,9 +390,9 @@ main_menu() {
     while true; do
         clear
         echo -e "${C_GREEN}======================================================${C_RESET}"
-        echo -e "            ${C_BLUE}Shadowsocks-rust 管理脚本${C_RESET}"
+        echo -e "  ${C_BLUE}Shadowsocks-rust 管理脚本${C_RESET}"
         
-        # --- [NEW] Status Display Logic ---
+        # --- 状态显示逻辑 ---
         local status_info
         if [[ -f "$VERSION_FILE" ]]; then
             local version="v$(cat "$VERSION_FILE")"
@@ -404,9 +404,8 @@ main_menu() {
         else
             status_info="${C_RED}未安装${C_RESET}"
         fi
-        echo -e "          当前状态: ${status_info}"
-        # --- End of New Logic ---
-
+        echo -e "  当前状态: ${status_info}"
+        
         echo -e "${C_GREEN}======================================================${C_RESET}"
         echo ""
         echo -e "  ${C_YELLOW}1.${C_RESET} 安装 Shadowsocks-rust"
