@@ -5,14 +5,14 @@
 # Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：3.8
+# 版本：3.9
 # 描述：一个安全、健壮的 shadowsocks-rust 管理脚本。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="3.8"
+readonly SCRIPT_VERSION="3.9"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -49,11 +49,9 @@ check_root() {
     fi
 }
 
-# --- 健壮的公网IP获取函数 (IPv4优先) ---
 get_public_ip() {
     info "正在查询公网IP地址..."
     local ip
-    # 优先尝试获取 IPv4 地址
     ip=$(curl -s -4 --max-time 5 https://api.ipify.org) || \
     ip=$(curl -s -4 --max-time 5 https://ip.sb)
 
@@ -64,19 +62,16 @@ get_public_ip() {
     fi
     
     warn "未能获取公网 IPv4 地址，正在尝试获取 IPv6..."
-    # 如果获取 IPv4 失败，则尝试获取 IPv6 地址
     ip=$(curl -s -6 --max-time 5 https://api64.ipify.org) || \
     ip=$(curl -s -6 --max-time 5 https://ip.sb)
 
     if [[ -n "$ip" ]]; then
-        # 如果是IPv6地址，需要用方括号包裹
         echo "[$ip]"
         success "成功获取公网 IPv6 地址。"
     else
         error "无法获取公网IP地址，请检查网络连接。"
     fi
 }
-
 
 detect_os() {
     if grep -qs "ubuntu" /etc/os-release; then
@@ -116,12 +111,10 @@ check_dependencies() {
         if [[ "${non_interactive:-false}" == "true" ]]; then
             info "将在非交互模式下自动安装..."
         else
-            # --- MODIFICATION START ---
             read -p "是否需要现在自动安装它们? (Y/n): " choice
             if [[ "$choice" =~ ^[Nn]$ ]]; then
                 error "缺少必要的依赖，脚本无法继续运行。"
             fi
-            # --- MODIFICATION END ---
         fi
         install_dependencies "$os_type" "${missing_deps[@]}"
     fi
@@ -144,7 +137,7 @@ install_dependencies() {
 
     if [[ "$os_type" == "ubuntu" || "$os_type" == "debian" ]]; then
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update
+        apt-get update -y
         apt-get install -y "${packages[@]}"
     elif [[ "$os_type" == "centos" ]]; then
         yum install -y epel-release &>/dev/null || true
@@ -152,7 +145,6 @@ install_dependencies() {
     fi
 }
 
-# --- Shadowsocks 核心功能函数 ---
 get_latest_version() {
     info "正在获取 shadowsocks-rust 的最新版本号..."
     local latest_version
@@ -213,7 +205,6 @@ generate_config() {
         fi
     else
         info "使用指定的密码。"
-        # --- 密码验证逻辑 ---
         if [[ "${non_interactive:-false}" == "true" ]]; then
             info "正在验证密码格式..."
             local decoded_len
@@ -264,7 +255,6 @@ EOF
     success "Systemd 服务已创建并设为开机自启。"
 }
 
-# --- 服务管理 ---
 manage_service() {
     if ! command -v systemctl &> /dev/null; then
         error "未找到 systemd，无法管理服务。"
@@ -288,7 +278,6 @@ manage_service() {
     esac
 }
 
-# --- 核心卸载逻辑 ---
 run_uninstall_logic() {
     if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then
         info "正在停止并禁用服务..."
@@ -306,7 +295,6 @@ run_uninstall_logic() {
     success "清理完成。"
 }
 
-# --- 面向用户的菜单功能 ---
 do_install() {
     if [[ -f "$BINARY_PATH" ]]; then
         warn "检测到 shadowsocks-rust 已安装。如果需要重装，请先运行卸载功能。"
@@ -357,13 +345,11 @@ do_uninstall() {
         return
     fi
 
-    # --- MODIFICATION START ---
     read -p "您确定要彻底清理 shadowsocks-rust 吗? (Y/n): " choice
     if [[ "$choice" =~ ^[Nn]$ ]]; then
         info "已取消卸载操作。"
         return
     fi
-    # --- MODIFICATION END ---
 
     run_uninstall_logic
 }
@@ -373,40 +359,54 @@ view_config() {
         error "找不到配置文件，请先执行安装。"
     fi
 
-    # 使用新的健壮的IP获取函数
     local ip_address
     ip_address=$(get_public_ip)
     
-    local port password method
+    local port password method node_name
     port=$(jq -r '.server_port' "$CONFIG_PATH")
     password=$(jq -r '.password' "$CONFIG_PATH")
     method=$(jq -r '.method' "$CONFIG_PATH")
-
-    local node_name="$(hostname) ss2022"
+    node_name="$(hostname) ss2022"
 
     local encoded_credentials
     encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
     local ss_link="ss://${encoded_credentials}@${ip_address}:${port}#${node_name}"
 
     {
-        echo -e "\n--- Shadowsocks 配置信息 ---"
-        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}   $ip_address"
-        echo -e "  ${C_YELLOW}端口:${C_RESET}         $port"
-        echo -e "  ${C_YELLOW}密码:${C_RESET}         $password"
-        echo -e "  ${C_YELLOW}加密方式:${C_RESET}     $method"
+        echo -e "\n--- Shadowsocks-2022 订阅信息 ---"
+        echo -e "  ${C_YELLOW}名称:${C_RESET}           ${node_name}"
+        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}     ${ip_address}"
+        echo -e "  ${C_YELLOW}端口:${C_RESET}           ${port}"
+        echo -e "  ${C_YELLOW}密码:${C_RESET}           ${password}"
+        echo -e "  ${C_YELLOW}加密方式:${C_RESET}       ${method}"
         echo "-----------------------------------"
-        echo -e "  ${C_GREEN}SS 链接:${C_RESET} $ss_link"
+        echo -e "  ${C_GREEN}SS 链接:${C_RESET} ${ss_link}"
         echo -e "(您可以复制上面的 SS 链接直接导入到客户端)"
     } >&2
 }
 
-# --- 主菜单 ---
+# --- [MODIFIED FUNCTION] ---
 main_menu() {
     while true; do
         clear
         echo -e "${C_GREEN}======================================================${C_RESET}"
-        echo -e "           ${C_BLUE}Shadowsocks-rust 管理脚本${C_RESET}"
-        echo -e "           版本: ${C_YELLOW}${SCRIPT_VERSION}${C_RESET}"
+        echo -e "            ${C_BLUE}Shadowsocks-rust 管理脚本${C_RESET}"
+        
+        # --- [NEW] Status Display Logic ---
+        local status_info
+        if [[ -f "$VERSION_FILE" ]]; then
+            local version="v$(cat "$VERSION_FILE")"
+            if systemctl is-active --quiet ss-rust; then
+                status_info="${C_GREEN}${version} (运行中)${C_RESET}"
+            else
+                status_info="${C_YELLOW}${version} (已停止)${C_RESET}"
+            fi
+        else
+            status_info="${C_RED}未安装${C_RESET}"
+        fi
+        echo -e "          当前状态: ${status_info}"
+        # --- End of New Logic ---
+
         echo -e "${C_GREEN}======================================================${C_RESET}"
         echo ""
         echo -e "  ${C_YELLOW}1.${C_RESET} 安装 Shadowsocks-rust"
@@ -422,16 +422,6 @@ main_menu() {
         echo -e "  ${C_YELLOW}0.${C_RESET} 退出脚本"
         echo ""
 
-        if [[ -f "$BINARY_PATH" ]]; then
-            if systemctl is-active --quiet ss-rust; then
-                echo -e "  当前状态: ${C_GREEN}已安装并正在运行${C_RESET}"
-            else
-                echo -e "  当前状态: ${C_YELLOW}已安装但已停止${C_RESET}"
-            fi
-        else
-            echo -e "  当前状态: ${C_RED}未安装${C_RESET}"
-        fi
-        echo "------------------------------------"
         read -p "请输入您的选项 [0-8]: " choice
 
         case "$choice" in
