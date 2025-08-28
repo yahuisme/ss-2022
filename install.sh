@@ -5,14 +5,14 @@
 # Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：4.0
+# 版本：4.1
 # 描述：一个安全、健壮的 shadowsocks-rust 管理脚本。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="4.0"
+readonly SCRIPT_VERSION="4.1"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -354,6 +354,7 @@ do_uninstall() {
     run_uninstall_logic
 }
 
+# --- [MODIFIED FUNCTION] ---
 view_config() {
     if [[ ! -f "$CONFIG_PATH" ]]; then
         error "找不到配置文件，请先执行安装。"
@@ -374,18 +375,19 @@ view_config() {
 
     {
         echo -e "\n--- Shadowsocks-2022 订阅信息 ---"
-        echo -e "  ${C_YELLOW}名称:${C_RESET}           ${node_name}"
-        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}     ${ip_address}"
-        echo -e "  ${C_YELLOW}端口:${C_RESET}           ${port}"
-        echo -e "  ${C_YELLOW}密码:${C_RESET}           ${password}"
-        echo -e "  ${C_YELLOW}加密方式:${C_RESET}       ${method}"
+        echo -e "  ${C_YELLOW}名称:${C_RESET}            ${node_name}"
+        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}        ${ip_address}"
+        echo -e "  ${C_YELLOW}端口:${C_RESET}            ${port}"
+        echo -e "  ${C_YELLOW}密码:${C_RESET}            ${password}"
+        echo -e "  ${C_YELLOW}加密方式:${C_RESET}        ${method}"
         echo "-----------------------------------"
+        echo ""
         echo -e "  ${C_GREEN}SS 链接:${C_RESET} ${ss_link}"
+        echo ""
         echo -e "(您可以复制上面的 SS 链接直接导入到客户端)"
     } >&2
 }
 
-# --- [MODIFIED FUNCTION] ---
 main_menu() {
     while true; do
         clear
