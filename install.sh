@@ -5,14 +5,14 @@
 # Shadowsocks Rust 管理脚本 (已集成 v2ray-plugin)
 #
 # 作者：yahuisme
-# 版本：4.3 (Bugfix)
+# 版本：4.4 (Default obfs to yes)
 # 描述：一个安全、健壮的 shadowsocks-rust 管理脚本，增加了 obfs 混淆选项。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="4.3"
+readonly SCRIPT_VERSION="4.4"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -25,6 +25,7 @@ readonly KEY_BYTES=16
 # --- v2ray-plugin 配置 ---
 readonly V2RAY_PLUGIN_BINARY_PATH="/usr/local/bin/v2ray-plugin"
 readonly V2RAY_PLUGIN_VERSION_FILE="${INSTALL_DIR}/v2ray-plugin.ver.txt"
+readonly V2RAY_PLUGIN_OBFS_HOST="www.bing.com" # 伪装域名
 
 # --- 颜色定义 ---
 readonly C_RESET='\033[0m'
@@ -111,7 +112,7 @@ detect_v2ray_plugin_arch() {
 
 check_dependencies() {
     info "正在检查必要的依赖工具..."
-    local dependencies=("curl" "jq" "wget" "tar" "xz" "openssl" "find") # 确保 find 命令存在
+    local dependencies=("curl" "jq" "wget" "tar" "xz" "openssl" "find")
     local os_type="$1"
     local missing_deps=()
 
@@ -191,7 +192,6 @@ download_and_install() {
     success "shadowsocks-rust v${version} 安装成功。"
 }
 
-# --- [FIXED FUNCTION] 下载并安装 v2ray-plugin ---
 download_and_install_v2ray_plugin() {
     local arch
     arch=$(detect_v2ray_plugin_arch)
@@ -207,7 +207,6 @@ download_and_install_v2ray_plugin() {
     info "正在解压并安装 v2ray-plugin..."
     tar -zxf "$download_path" -C "$TMP_DIR"
     
-    # 动态查找解压出的可执行文件，不再硬编码文件名
     local extracted_executable
     extracted_executable=$(find "$TMP_DIR" -type f \( -name "v2ray-plugin_*" -o -name "v2ray-plugin" \) | head -n 1)
 
@@ -270,8 +269,9 @@ generate_config() {
         touch "$OBFS_FLAG_FILE"
         download_and_install_v2ray_plugin
     elif [[ "${non_interactive:-false}" != "true" ]]; then
-        read -p "是否启用 obfs 混淆 (websocket模式)? (y/N): " choice
-        if [[ "$choice" =~ ^[Yy]$ ]]; then
+        # --- [MODIFIED] Default to Yes ---
+        read -p "是否启用 obfs 混淆 (websocket模式)? (Y/n): " choice
+        if [[ ! "$choice" =~ ^[Nn]$ ]]; then
             info "正在启用 obfs 混淆..."
             touch "$OBFS_FLAG_FILE"
             download_and_install_v2ray_plugin
@@ -464,7 +464,7 @@ view_config() {
     node_name="$(hostname) ss2022"
 
     if [[ -f "$OBFS_FLAG_FILE" ]]; then
-        local plugin_opts="obfs=websocket;obfs-host=www.bing.com"
+        local plugin_opts="obfs=websocket;obfs-host=${V2RAY_PLUGIN_OBFS_HOST}"
         local encoded_plugin_opts
         encoded_plugin_opts=$(echo -n "$plugin_opts" | jq -sRr @uri)
         node_name="${node_name}-obfs"
