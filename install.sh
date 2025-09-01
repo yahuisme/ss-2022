@@ -5,14 +5,14 @@
 # Shadowsocks Rust 管理脚本 (已集成 v2ray-plugin)
 #
 # 作者：yahuisme
-# 版本：4.2 (Modded)
+# 版本：4.3 (Bugfix)
 # 描述：一个安全、健壮的 shadowsocks-rust 管理脚本，增加了 obfs 混淆选项。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="4.2"
+readonly SCRIPT_VERSION="4.3"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -99,7 +99,6 @@ detect_arch() {
     esac
 }
 
-# --- [新函数] v2ray-plugin 架构检测 ---
 detect_v2ray_plugin_arch() {
     case "$(uname -m)" in
         x86_64) echo "linux-amd64" ;;
@@ -112,7 +111,7 @@ detect_v2ray_plugin_arch() {
 
 check_dependencies() {
     info "正在检查必要的依赖工具..."
-    local dependencies=("curl" "jq" "wget" "tar" "xz" "openssl")
+    local dependencies=("curl" "jq" "wget" "tar" "xz" "openssl" "find") # 确保 find 命令存在
     local os_type="$1"
     local missing_deps=()
 
@@ -147,6 +146,7 @@ install_dependencies() {
     for dep in "${deps_to_install[@]}"; do
         case "$dep" in
             xz) [[ "$os_type" == "ubuntu" || "$os_type" == "debian" ]] && packages+=("xz-utils") || packages+=("xz") ;;
+            find) [[ "$os_type" == "ubuntu" || "$os_type" == "debian" ]] && packages+=("findutils") || packages+=("findutils") ;;
             *) packages+=("$dep") ;;
         esac
     done
@@ -191,7 +191,7 @@ download_and_install() {
     success "shadowsocks-rust v${version} 安装成功。"
 }
 
-# --- [新函数] 下载并安装 v2ray-plugin ---
+# --- [FIXED FUNCTION] 下载并安装 v2ray-plugin ---
 download_and_install_v2ray_plugin() {
     local arch
     arch=$(detect_v2ray_plugin_arch)
@@ -205,13 +205,17 @@ download_and_install_v2ray_plugin() {
     wget -qO "$download_path" "$download_url" || error "v2ray-plugin 下载失败。"
 
     info "正在解压并安装 v2ray-plugin..."
-    # 根据架构动态确定解压出的文件名
-    local extracted_filename="v2ray-plugin_${arch}"
-    if [[ "$arch" == "linux-arm" ]]; then
-        extracted_filename="v2ray-plugin_linux_armv7" # armv7l 特殊处理
-    fi
     tar -zxf "$download_path" -C "$TMP_DIR"
-    install -m 755 "${TMP_DIR}/${extracted_filename}" "$V2RAY_PLUGIN_BINARY_PATH"
+    
+    # 动态查找解压出的可执行文件，不再硬编码文件名
+    local extracted_executable
+    extracted_executable=$(find "$TMP_DIR" -type f \( -name "v2ray-plugin_*" -o -name "v2ray-plugin" \) | head -n 1)
+
+    if [[ -z "$extracted_executable" ]]; then
+        error "在解压的 v2ray-plugin 归档文件中未找到可执行文件。"
+    fi
+    
+    install -m 755 "$extracted_executable" "$V2RAY_PLUGIN_BINARY_PATH"
     
     echo "$latest_version" > "$V2RAY_PLUGIN_VERSION_FILE"
     success "v2ray-plugin v${latest_version} 安装成功。"
@@ -261,7 +265,6 @@ generate_config() {
         fi
     fi
 
-    # --- [修改] 增加 obfs 选项 ---
     if [[ "$enable_obfs" == "true" ]]; then
         info "已通过参数启用 obfs 混淆。"
         touch "$OBFS_FLAG_FILE"
@@ -297,7 +300,6 @@ generate_config() {
 create_systemd_service() {
     info "正在创建 systemd 服务..."
     
-    # --- [修改] 根据是否启用 obfs 生成不同的 ExecStart ---
     local exec_start_cmd
     if [[ -f "$OBFS_FLAG_FILE" ]]; then
         success "检测到 obfs 已启用，将使用 v2ray-plugin 启动。"
@@ -361,7 +363,7 @@ run_uninstall_logic() {
     info "正在删除相关文件..."
     rm -f "$BINARY_PATH"
     rm -f "$SYSTEMD_SERVICE_FILE"
-    rm -f "$V2RAY_PLUGIN_BINARY_PATH" # --- [修改] 增加删除 v2ray-plugin
+    rm -f "$V2RAY_PLUGIN_BINARY_PATH"
     rm -rf "$INSTALL_DIR"
     if command -v systemctl &> /dev/null; then
         info "正在重载 systemd..."
@@ -408,7 +410,6 @@ do_update() {
         download_and_install "$latest_version" "$arch"
     fi
 
-    # --- [修改] 检查并更新 v2ray-plugin ---
     if [[ -f "$OBFS_FLAG_FILE" ]]; then
         info "正在检查 v2ray-plugin 更新..."
         local current_plugin_version="0"
@@ -462,11 +463,9 @@ view_config() {
     method=$(jq -r '.method' "$CONFIG_PATH")
     node_name="$(hostname) ss2022"
 
-    # --- [修改] 根据是否启用 obfs 生成不同链接 ---
     if [[ -f "$OBFS_FLAG_FILE" ]]; then
         local plugin_opts="obfs=websocket;obfs-host=www.bing.com"
         local encoded_plugin_opts
-        # URL-safe encode
         encoded_plugin_opts=$(echo -n "$plugin_opts" | jq -sRr @uri)
         node_name="${node_name}-obfs"
 
@@ -518,7 +517,6 @@ main_menu() {
         echo -e "${C_GREEN}======================================================${C_RESET}"
         echo -e "  ${C_BLUE}Shadowsocks-rust 管理脚本 (v2ray-plugin 已集成)${C_RESET}"
         
-        # --- 状态显示逻辑 ---
         local status_info obfs_status
         if [[ -f "$VERSION_FILE" ]]; then
             local version="v$(cat "$VERSION_FILE")"
@@ -528,7 +526,6 @@ main_menu() {
                 status_info="${C_YELLOW}${version} (已停止)${C_RESET}"
             fi
             
-            # --- [修改] 增加 obfs 状态显示 ---
             if [[ -f "$OBFS_FLAG_FILE" ]]; then
                 obfs_status="${C_GREEN}已启用${C_RESET}"
             else
@@ -576,7 +573,6 @@ main_menu() {
     done
 }
 
-# --- 脚本入口 ---
 main() {
     check_root
 
@@ -584,7 +580,6 @@ main() {
     local ss_password=""
     local enable_obfs=false
 
-    # --- [修改] 增加 --obfs 参数 ---
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--port)
