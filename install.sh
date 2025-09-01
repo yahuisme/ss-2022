@@ -5,14 +5,14 @@
 # Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：4.1
-# 描述：一个安全、健壮的 shadowsocks-rust 管理脚本。
+# 版本：4.5 (Optimized)
+# 描述：一个更安全、更健壮的 shadowsocks-rust 管理脚本。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="4.1"
+readonly SCRIPT_VERSION="4.5"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -111,7 +111,7 @@ check_dependencies() {
         if [[ "${non_interactive:-false}" == "true" ]]; then
             info "将在非交互模式下自动安装..."
         else
-            read -p "是否需要现在自动安装它们? (Y/n): " choice
+            read -p "是否需要现在自动安装它们? (Y/n): " choice || true
             if [[ "$choice" =~ ^[Nn]$ ]]; then
                 error "缺少必要的依赖，脚本无法继续运行。"
             fi
@@ -162,7 +162,9 @@ download_and_install() {
     local download_path="${TMP_DIR}/ss-rust.tar.xz"
 
     info "从以下地址下载: $download_url"
-    wget -qO "$download_path" "$download_url" || error "下载失败。"
+    if ! wget -qO "$download_path" "$download_url"; then
+        error "下载失败，请检查网络连接或确认 GitHub Release 链接是否有效。"
+    fi
 
     info "正在解压并安装..."
     tar -xf "$download_path" -C "$TMP_DIR"
@@ -183,7 +185,7 @@ generate_config() {
 
     if [[ -z "$port" ]]; then
         while true; do
-            read -p "请输入 Shadowsocks 端口 [1-65535] (默认: 8388): " port
+            read -p "请输入 Shadowsocks 端口 [1-65535] (默认: 8388): " port || true
             port=${port:-8388}
             if [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]]; then
                 break
@@ -196,7 +198,7 @@ generate_config() {
     fi
 
     if [[ -z "$password" ]]; then
-        read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input
+        read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input || true
         if [[ -z "$password_input" ]]; then
             info "为 ${ENCRYPTION_METHOD} 生成 ${KEY_BYTES} 字节随机密码..."
             password=$(openssl rand -base64 ${KEY_BYTES})
@@ -208,7 +210,9 @@ generate_config() {
         if [[ "${non_interactive:-false}" == "true" ]]; then
             info "正在验证密码格式..."
             local decoded_len
-            decoded_len=$(echo "$password" | openssl base64 -d -A 2>/dev/null | wc -c)
+            if ! decoded_len=$(echo "$password" | openssl base64 -d -A 2>/dev/null | wc -c); then
+                error "密码验证失败！无法进行 Base64 解码。"
+            fi
             if [[ "$decoded_len" -ne "$KEY_BYTES" ]]; then
                 error "密码验证失败！提供的密码 '${password}' 不是一个有效的 Base64 字符串，或者解码后的密钥长度不是 ${KEY_BYTES} 字节。"
             fi
@@ -256,6 +260,7 @@ EOF
 }
 
 manage_service() {
+    local action="$1"
     if ! command -v systemctl &> /dev/null; then
         error "未找到 systemd，无法管理服务。"
     fi
@@ -263,17 +268,32 @@ manage_service() {
         error "shadowsocks-rust 未安装，无法执行操作。"
     fi
 
-    case "$1" in
-        start|stop|restart|status)
-            if [[ "$1" == "status" ]]; then
-                systemctl status --full --no-pager ss-rust
+    case "$action" in
+        start|stop|restart)
+            info "正在执行: systemctl $action ss-rust"
+            if ! systemctl "$action" ss-rust; then
+                error "命令 'systemctl $action ss-rust' 执行失败。"
+                return 1
+            fi
+            
+            # [OPTIMIZED] 增加状态检查
+            if [[ "$action" != "stop" ]]; then
+                sleep 2 # 等待服务状态更新
+                if systemctl is-active --quiet ss-rust; then
+                    success "服务已成功 ${action}！"
+                else
+                    error "服务 ${action} 失败，请使用 '查看服务状态' 功能检查日志。"
+                    return 1
+                fi
             else
-                info "正在执行: systemctl $1 ss-rust"
-                systemctl "$1" ss-rust
+                success "停止命令已发送。"
             fi
             ;;
+        status)
+            systemctl status --full --no-pager ss-rust || true
+            ;;
         *)
-            error "无效的操作: $1"
+            error "无效的操作: $action"
             ;;
     esac
 }
@@ -325,8 +345,9 @@ do_update() {
     current_version=$(cat "$VERSION_FILE")
     latest_version=$(get_latest_version)
 
+    info "当前版本: v${current_version} | 最新版本: v${latest_version}"
     if [[ "$current_version" == "$latest_version" ]]; then
-        info "您当前已是最新版本: v$current_version"
+        success "您当前已是最新版本。"
         return
     fi
 
@@ -334,8 +355,6 @@ do_update() {
     arch=$(detect_arch)
     download_and_install "$latest_version" "$arch"
     manage_service "restart"
-
-    success "更新完成。"
 }
 
 do_uninstall() {
@@ -345,7 +364,7 @@ do_uninstall() {
         return
     fi
 
-    read -p "您确定要彻底清理 shadowsocks-rust 吗? (Y/n): " choice
+    read -p "您确定要彻底清理 shadowsocks-rust 吗? (Y/n): " choice || true
     if [[ "$choice" =~ ^[Nn]$ ]]; then
         info "已取消卸载操作。"
         return
@@ -354,7 +373,6 @@ do_uninstall() {
     run_uninstall_logic
 }
 
-# --- [MODIFIED FUNCTION] ---
 view_config() {
     if [[ ! -f "$CONFIG_PATH" ]]; then
         error "找不到配置文件，请先执行安装。"
@@ -367,34 +385,33 @@ view_config() {
     port=$(jq -r '.server_port' "$CONFIG_PATH")
     password=$(jq -r '.password' "$CONFIG_PATH")
     method=$(jq -r '.method' "$CONFIG_PATH")
-    node_name="$(hostname) ss2022"
+    node_name="$(hostname)-ss2022"
 
     local encoded_credentials
     encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
     local ss_link="ss://${encoded_credentials}@${ip_address}:${port}#${node_name}"
 
     {
-        echo -e "\n--- Shadowsocks-2022 订阅信息 ---"
-        echo -e "  ${C_YELLOW}名称:${C_RESET}            ${node_name}"
-        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}        ${ip_address}"
-        echo -e "  ${C_YELLOW}端口:${C_RESET}            ${port}"
-        echo -e "  ${C_YELLOW}密码:${C_RESET}            ${password}"
-        echo -e "  ${C_YELLOW}加密方式:${C_RESET}        ${method}"
-        echo "-----------------------------------"
-        echo ""
-        echo -e "  ${C_GREEN}SS 链接:${C_RESET} ${ss_link}"
-        echo ""
-        echo -e "(您可以复制上面的 SS 链接直接导入到客户端)"
+        printf "\n--- Shadowsocks-2022 订阅信息 ---\n"
+        printf "  %b名称:%b         %s\n" "${C_YELLOW}" "${C_RESET}" "${node_name}"
+        printf "  %b服务器地址:%b   %s\n" "${C_YELLOW}" "${C_RESET}" "${ip_address}"
+        printf "  %b端口:%b           %s\n" "${C_YELLOW}" "${C_RESET}" "${port}"
+        printf "  %b密码:%b           %s\n" "${C_YELLOW}" "${C_RESET}" "${password}"
+        printf "  %b加密方式:%b     %s\n" "${C_YELLOW}" "${C_RESET}" "${method}"
+        printf "-----------------------------------\n"
+        printf "\n"
+        printf "  %bSS 链接:%b %s\n" "${C_GREEN}" "${C_RESET}" "${ss_link}"
+        printf "\n"
+        printf "(您可以复制上面的 SS 链接直接导入到客户端)\n"
     } >&2
 }
 
 main_menu() {
     while true; do
         clear
-        echo -e "${C_GREEN}======================================================${C_RESET}"
-        echo -e "  ${C_BLUE}Shadowsocks-rust 管理脚本${C_RESET}"
+        printf "%b======================================================%b\n" "${C_GREEN}" "${C_RESET}"
+        printf "  %bShadowsocks-rust 管理脚本 (纯 ss2022 方案)%b\n" "${C_BLUE}" "${C_RESET}"
         
-        # --- 状态显示逻辑 ---
         local status_info
         if [[ -f "$VERSION_FILE" ]]; then
             local version="v$(cat "$VERSION_FILE")"
@@ -406,32 +423,30 @@ main_menu() {
         else
             status_info="${C_RED}未安装${C_RESET}"
         fi
-        echo -e "  当前状态: ${status_info}"
+        printf "  当前状态: %b\n" "${status_info}"
         
-        echo -e "${C_GREEN}======================================================${C_RESET}"
-        echo ""
-        echo -e "  ${C_YELLOW}1.${C_RESET} 安装 Shadowsocks-rust"
-        echo -e "  ${C_YELLOW}2.${C_RESET} 更新 Shadowsocks-rust"
-        echo -e "  ${C_YELLOW}3.${C_RESET} 卸载 Shadowsocks-rust"
-        echo "  ------------------------------------"
-        echo -e "  ${C_YELLOW}4.${C_RESET} 启动服务"
-        echo -e "  ${C_YELLOW}5.${C_RESET} 停止服务"
-        echo -e "  ${C_YELLOW}6.${C_RESET} 重启服务"
-        echo -e "  ${C_YELLOW}7.${C_RESET} 查看服务状态"
-        echo "  ------------------------------------"
-        echo -e "  ${C_YELLOW}8.${C_RESET} 查看配置信息"
-        echo -e "  ${C_YELLOW}0.${C_RESET} 退出脚本"
-        echo ""
+        printf "%b======================================================%b\n\n" "${C_GREEN}" "${C_RESET}"
+        printf "  %b1.%b 安装 Shadowsocks-rust\n" "${C_YELLOW}" "${C_RESET}"
+        printf "  %b2.%b 更新 Shadowsocks-rust\n" "${C_YELLOW}" "${C_RESET}"
+        printf "  %b3.%b 卸载 Shadowsocks-rust\n" "${C_YELLOW}" "${C_RESET}"
+        printf "  ------------------------------------\n"
+        printf "  %b4.%b 启动服务\n" "${C_YELLOW}" "${C_RESET}"
+        printf "  %b5.%b 停止服务\n" "${C_YELLOW}" "${C_RESET}"
+        printf "  %b6.%b 重启服务\n" "${C_YELLOW}" "${C_RESET}"
+        printf "  %b7.%b 查看服务状态\n" "${C_YELLOW}" "${C_RESET}"
+        printf "  ------------------------------------\n"
+        printf "  %b8.%b 查看配置信息\n" "${C_YELLOW}" "${C_RESET}"
+        printf "  %b0.%b 退出脚本\n\n" "${C_YELLOW}" "${C_RESET}"
 
-        read -p "请输入您的选项 [0-8]: " choice
+        read -p "请输入您的选项 [0-8]: " choice || true
 
         case "$choice" in
             1) do_install ;;
             2) do_update ;;
             3) do_uninstall ;;
-            4) manage_service "start"; success "启动命令已发送" ;;
-            5) manage_service "stop"; success "停止命令已发送" ;;
-            6) manage_service "restart"; success "重启命令已发送" ;;
+            4) manage_service "start" ;;
+            5) manage_service "stop" ;;
+            6) manage_service "restart" ;;
             7) manage_service "status" ;;
             8) view_config ;;
             0) exit 0 ;;
@@ -439,7 +454,7 @@ main_menu() {
         esac
 
         echo ""
-        read -p "按回车键返回主菜单..."
+        read -p "按回车键返回主菜单..." || true
     done
 }
 
@@ -450,6 +465,7 @@ main() {
     local ss_port=""
     local ss_password=""
 
+    # 非交互式参数解析
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--port)
@@ -460,8 +476,15 @@ main() {
                 ss_password="$2"
                 shift 2
                 ;;
+            -h|--help)
+                printf "用法: %s [-p PORT] [-w PASSWORD]\n" "$0"
+                printf "  -p, --port      指定 Shadowsocks 端口\n"
+                printf "  -w, --password    指定 Shadowsocks 密码 (必须是 %d 字节的 Base64 字符串)\n" "$KEY_BYTES"
+                printf "  如果不带任何参数，脚本将进入交互式菜单模式。\n"
+                exit 0
+                ;;
             *)
-                error "未知参数: $1"
+                error "未知参数: $1. 使用 -h 或 --help 查看帮助。"
                 ;;
         esac
     done
@@ -479,7 +502,7 @@ main() {
         check_dependencies "$os_type"
         arch=$(detect_arch)
 
-        info "步骤 3/6: 下载并安装最新版本..."
+        info "步骤 3/6: 获取并下载最新版本..."
         latest_version=$(get_latest_version)
         download_and_install "$latest_version" "$arch"
 
