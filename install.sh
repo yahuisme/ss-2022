@@ -2,24 +2,29 @@
 # shellcheck disable=SC2034,SC2155
 
 # ===================================================================================
-# Shadowsocks Rust 管理脚本
+# Shadowsocks Rust 管理脚本 (已集成 v2ray-plugin)
 #
 # 作者：yahuisme
-# 版本：4.1
-# 描述：一个安全、健壮的 shadowsocks-rust 管理脚本。
+# 版本：4.2 (Modded)
+# 描述：一个安全、健壮的 shadowsocks-rust 管理脚本，增加了 obfs 混淆选项。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="4.1"
+readonly SCRIPT_VERSION="4.2"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
+readonly OBFS_FLAG_FILE="${INSTALL_DIR}/obfs.flag" # 用于标记是否启用obfs
 readonly VERSION_FILE="${INSTALL_DIR}/ver.txt"
 readonly SYSTEMD_SERVICE_FILE="/etc/systemd/system/ss-rust.service"
 readonly ENCRYPTION_METHOD="2022-blake3-aes-128-gcm"
 readonly KEY_BYTES=16
+
+# --- v2ray-plugin 配置 ---
+readonly V2RAY_PLUGIN_BINARY_PATH="/usr/local/bin/v2ray-plugin"
+readonly V2RAY_PLUGIN_VERSION_FILE="${INSTALL_DIR}/v2ray-plugin.ver.txt"
 
 # --- 颜色定义 ---
 readonly C_RESET='\033[0m'
@@ -94,6 +99,17 @@ detect_arch() {
     esac
 }
 
+# --- [新函数] v2ray-plugin 架构检测 ---
+detect_v2ray_plugin_arch() {
+    case "$(uname -m)" in
+        x86_64) echo "linux-amd64" ;;
+        aarch64) echo "linux-arm64" ;;
+        armv7l) echo "linux-arm" ;;
+        *) error "v2ray-plugin 不支持此CPU架构: $(uname -m)" ;;
+    esac
+}
+
+
 check_dependencies() {
     info "正在检查必要的依赖工具..."
     local dependencies=("curl" "jq" "wget" "tar" "xz" "openssl")
@@ -146,9 +162,10 @@ install_dependencies() {
 }
 
 get_latest_version() {
-    info "正在获取 shadowsocks-rust 的最新版本号..."
+    local repo_url="$1"
+    info "正在获取 ${repo_url} 的最新版本号..."
     local latest_version
-    latest_version=$(curl -s "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -r '.tag_name // empty')
+    latest_version=$(curl -s "https://api.github.com/repos/${repo_url}/releases/latest" | jq -r '.tag_name // empty')
     if [[ -z "$latest_version" ]]; then
         error "获取最新版本失败，请检查网络或GitHub API访问。"
     fi
@@ -174,9 +191,37 @@ download_and_install() {
     success "shadowsocks-rust v${version} 安装成功。"
 }
 
+# --- [新函数] 下载并安装 v2ray-plugin ---
+download_and_install_v2ray_plugin() {
+    local arch
+    arch=$(detect_v2ray_plugin_arch)
+    local latest_version
+    latest_version=$(get_latest_version "shadowsocks/v2ray-plugin")
+
+    local download_url="https://github.com/shadowsocks/v2ray-plugin/releases/download/v${latest_version}/v2ray-plugin-${arch}-v${latest_version}.tar.gz"
+    local download_path="${TMP_DIR}/v2ray-plugin.tar.gz"
+
+    info "正在下载 v2ray-plugin: $download_url"
+    wget -qO "$download_path" "$download_url" || error "v2ray-plugin 下载失败。"
+
+    info "正在解压并安装 v2ray-plugin..."
+    # 根据架构动态确定解压出的文件名
+    local extracted_filename="v2ray-plugin_${arch}"
+    if [[ "$arch" == "linux-arm" ]]; then
+        extracted_filename="v2ray-plugin_linux_armv7" # armv7l 特殊处理
+    fi
+    tar -zxf "$download_path" -C "$TMP_DIR"
+    install -m 755 "${TMP_DIR}/${extracted_filename}" "$V2RAY_PLUGIN_BINARY_PATH"
+    
+    echo "$latest_version" > "$V2RAY_PLUGIN_VERSION_FILE"
+    success "v2ray-plugin v${latest_version} 安装成功。"
+}
+
+
 generate_config() {
     local port=${1:-}
     local password=${2:-}
+    local enable_obfs=${3:-false}
 
     info "正在生成配置文件..."
     info "将使用固定的加密方式: ${ENCRYPTION_METHOD}"
@@ -216,6 +261,23 @@ generate_config() {
         fi
     fi
 
+    # --- [修改] 增加 obfs 选项 ---
+    if [[ "$enable_obfs" == "true" ]]; then
+        info "已通过参数启用 obfs 混淆。"
+        touch "$OBFS_FLAG_FILE"
+        download_and_install_v2ray_plugin
+    elif [[ "${non_interactive:-false}" != "true" ]]; then
+        read -p "是否启用 obfs 混淆 (websocket模式)? (y/N): " choice
+        if [[ "$choice" =~ ^[Yy]$ ]]; then
+            info "正在启用 obfs 混淆..."
+            touch "$OBFS_FLAG_FILE"
+            download_and_install_v2ray_plugin
+        else
+            info "已禁用 obfs 混淆。"
+            rm -f "$OBFS_FLAG_FILE"
+        fi
+    fi
+
     jq -n \
         --argjson server_port "$port" \
         --arg password "$password" \
@@ -234,6 +296,17 @@ generate_config() {
 
 create_systemd_service() {
     info "正在创建 systemd 服务..."
+    
+    # --- [修改] 根据是否启用 obfs 生成不同的 ExecStart ---
+    local exec_start_cmd
+    if [[ -f "$OBFS_FLAG_FILE" ]]; then
+        success "检测到 obfs 已启用，将使用 v2ray-plugin 启动。"
+        exec_start_cmd="$BINARY_PATH -c $CONFIG_PATH --plugin $V2RAY_PLUGIN_BINARY_PATH --plugin-opts \"server\""
+    else
+        info "未启用 obfs。"
+        exec_start_cmd="$BINARY_PATH -c $CONFIG_PATH"
+    fi
+
     cat > "$SYSTEMD_SERVICE_FILE" << EOF
 [Unit]
 Description=Shadowsocks-rust Server Service
@@ -242,7 +315,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=$BINARY_PATH -c $CONFIG_PATH
+ExecStart=$exec_start_cmd
 Restart=on-failure
 LimitNOFILE=65535
 
@@ -254,6 +327,7 @@ EOF
     systemctl enable ss-rust
     success "Systemd 服务已创建并设为开机自启。"
 }
+
 
 manage_service() {
     if ! command -v systemctl &> /dev/null; then
@@ -287,6 +361,7 @@ run_uninstall_logic() {
     info "正在删除相关文件..."
     rm -f "$BINARY_PATH"
     rm -f "$SYSTEMD_SERVICE_FILE"
+    rm -f "$V2RAY_PLUGIN_BINARY_PATH" # --- [修改] 增加删除 v2ray-plugin
     rm -rf "$INSTALL_DIR"
     if command -v systemctl &> /dev/null; then
         info "正在重载 systemd..."
@@ -305,7 +380,7 @@ do_install() {
     os_type=$(detect_os)
     check_dependencies "$os_type"
     arch=$(detect_arch)
-    latest_version=$(get_latest_version)
+    latest_version=$(get_latest_version "shadowsocks/shadowsocks-rust")
 
     download_and_install "$latest_version" "$arch"
     generate_config
@@ -323,20 +398,39 @@ do_update() {
 
     local current_version latest_version arch
     current_version=$(cat "$VERSION_FILE")
-    latest_version=$(get_latest_version)
+    latest_version=$(get_latest_version "shadowsocks/shadowsocks-rust")
 
     if [[ "$current_version" == "$latest_version" ]]; then
         info "您当前已是最新版本: v$current_version"
-        return
+    else
+        info "发现新版本，准备从 v$current_version 更新到 v$latest_version..."
+        arch=$(detect_arch)
+        download_and_install "$latest_version" "$arch"
     fi
 
-    info "发现新版本，准备从 v$current_version 更新到 v$latest_version..."
-    arch=$(detect_arch)
-    download_and_install "$latest_version" "$arch"
-    manage_service "restart"
+    # --- [修改] 检查并更新 v2ray-plugin ---
+    if [[ -f "$OBFS_FLAG_FILE" ]]; then
+        info "正在检查 v2ray-plugin 更新..."
+        local current_plugin_version="0"
+        if [[ -f "$V2RAY_PLUGIN_VERSION_FILE" ]]; then
+            current_plugin_version=$(cat "$V2RAY_PLUGIN_VERSION_FILE")
+        fi
+        
+        local latest_plugin_version
+        latest_plugin_version=$(get_latest_version "shadowsocks/v2ray-plugin")
 
+        if [[ "$current_plugin_version" != "$latest_plugin_version" ]]; then
+             info "发现 v2ray-plugin 新版本，准备从 v$current_plugin_version 更新到 v$latest_plugin_version..."
+             download_and_install_v2ray_plugin
+        else
+            info "v2ray-plugin 已是最新版本 v$current_plugin_version。"
+        fi
+    fi
+
+    manage_service "restart"
     success "更新完成。"
 }
+
 
 do_uninstall() {
     info "准备卸载 shadowsocks-rust..."
@@ -354,7 +448,6 @@ do_uninstall() {
     run_uninstall_logic
 }
 
-# --- [MODIFIED FUNCTION] ---
 view_config() {
     if [[ ! -f "$CONFIG_PATH" ]]; then
         error "找不到配置文件，请先执行安装。"
@@ -369,33 +462,64 @@ view_config() {
     method=$(jq -r '.method' "$CONFIG_PATH")
     node_name="$(hostname) ss2022"
 
-    local encoded_credentials
-    encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
-    local ss_link="ss://${encoded_credentials}@${ip_address}:${port}#${node_name}"
+    # --- [修改] 根据是否启用 obfs 生成不同链接 ---
+    if [[ -f "$OBFS_FLAG_FILE" ]]; then
+        local plugin_opts="obfs=websocket;obfs-host=www.bing.com"
+        local encoded_plugin_opts
+        # URL-safe encode
+        encoded_plugin_opts=$(echo -n "$plugin_opts" | jq -sRr @uri)
+        node_name="${node_name}-obfs"
 
-    {
-        echo -e "\n--- Shadowsocks-2022 订阅信息 ---"
-        echo -e "  ${C_YELLOW}名称:${C_RESET}            ${node_name}"
-        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}        ${ip_address}"
-        echo -e "  ${C_YELLOW}端口:${C_RESET}            ${port}"
-        echo -e "  ${C_YELLOW}密码:${C_RESET}            ${password}"
-        echo -e "  ${C_YELLOW}加密方式:${C_RESET}        ${method}"
-        echo "-----------------------------------"
-        echo ""
-        echo -e "  ${C_GREEN}SS 链接:${C_RESET} ${ss_link}"
-        echo ""
-        echo -e "(您可以复制上面的 SS 链接直接导入到客户端)"
-    } >&2
+        local encoded_credentials
+        encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
+        local ss_link="ss://${encoded_credentials}@${ip_address}:${port}?plugin=${encoded_plugin_opts}#${node_name}"
+        
+        {
+            echo -e "\n--- Shadowsocks-2022 订阅信息 (OBFS 已启用) ---"
+            echo -e "  ${C_YELLOW}名称:${C_RESET}           ${node_name}"
+            echo -e "  ${C_YELLOW}服务器地址:${C_RESET}       ${ip_address}"
+            echo -e "  ${C_YELLOW}端口:${C_RESET}           ${port}"
+            echo -e "  ${C_YELLOW}密码:${C_RESET}           ${password}"
+            echo -e "  ${C_YELLOW}加密方式:${C_RESET}       ${method}"
+            echo -e "  ${C_YELLOW}插件:${C_RESET}           v2ray-plugin"
+            echo -e "  ${C_YELLOW}插件选项:${C_RESET}       ${plugin_opts}"
+            echo "--------------------------------------------------"
+            echo ""
+            echo -e "  ${C_GREEN}SS 链接:${C_RESET} ${ss_link}"
+            echo ""
+            echo -e "(此链接已包含 obfs 配置，请使用支持 v2ray-plugin 的客户端导入)"
+        } >&2
+
+    else
+        local encoded_credentials
+        encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
+        local ss_link="ss://${encoded_credentials}@${ip_address}:${port}#${node_name}"
+
+        {
+            echo -e "\n--- Shadowsocks-2022 订阅信息 ---"
+            echo -e "  ${C_YELLOW}名称:${C_RESET}           ${node_name}"
+            echo -e "  ${C_YELLOW}服务器地址:${C_RESET}       ${ip_address}"
+            echo -e "  ${C_YELLOW}端口:${C_RESET}           ${port}"
+            echo -e "  ${C_YELLOW}密码:${C_RESET}           ${password}"
+            echo -e "  ${C_YELLOW}加密方式:${C_RESET}       ${method}"
+            echo "-----------------------------------"
+            echo ""
+            echo -e "  ${C_GREEN}SS 链接:${C_RESET} ${ss_link}"
+            echo ""
+            echo -e "(您可以复制上面的 SS 链接直接导入到客户端)"
+        } >&2
+    fi
 }
+
 
 main_menu() {
     while true; do
         clear
         echo -e "${C_GREEN}======================================================${C_RESET}"
-        echo -e "  ${C_BLUE}Shadowsocks-rust 管理脚本${C_RESET}"
+        echo -e "  ${C_BLUE}Shadowsocks-rust 管理脚本 (v2ray-plugin 已集成)${C_RESET}"
         
         # --- 状态显示逻辑 ---
-        local status_info
+        local status_info obfs_status
         if [[ -f "$VERSION_FILE" ]]; then
             local version="v$(cat "$VERSION_FILE")"
             if systemctl is-active --quiet ss-rust; then
@@ -403,15 +527,24 @@ main_menu() {
             else
                 status_info="${C_YELLOW}${version} (已停止)${C_RESET}"
             fi
+            
+            # --- [修改] 增加 obfs 状态显示 ---
+            if [[ -f "$OBFS_FLAG_FILE" ]]; then
+                obfs_status="${C_GREEN}已启用${C_RESET}"
+            else
+                obfs_status="${C_YELLOW}未启用${C_RESET}"
+            fi
+            echo -e "  当前状态: ${status_info} | OBFS 混淆: ${obfs_status}"
+
         else
             status_info="${C_RED}未安装${C_RESET}"
+            echo -e "  当前状态: ${status_info}"
         fi
-        echo -e "  当前状态: ${status_info}"
         
         echo -e "${C_GREEN}======================================================${C_RESET}"
         echo ""
         echo -e "  ${C_YELLOW}1.${C_RESET} 安装 Shadowsocks-rust"
-        echo -e "  ${C_YELLOW}2.${C_RESET} 更新 Shadowsocks-rust"
+        echo -e "  ${C_YELLOW}2.${C_RESET} 更新 Shadowsocks-rust (和插件)"
         echo -e "  ${C_YELLOW}3.${C_RESET} 卸载 Shadowsocks-rust"
         echo "  ------------------------------------"
         echo -e "  ${C_YELLOW}4.${C_RESET} 启动服务"
@@ -449,7 +582,9 @@ main() {
 
     local ss_port=""
     local ss_password=""
+    local enable_obfs=false
 
+    # --- [修改] 增加 --obfs 参数 ---
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--port)
@@ -459,6 +594,10 @@ main() {
             -w|--password)
                 ss_password="$2"
                 shift 2
+                ;;
+            --obfs)
+                enable_obfs=true
+                shift 1
                 ;;
             *)
                 error "未知参数: $1"
@@ -480,11 +619,11 @@ main() {
         arch=$(detect_arch)
 
         info "步骤 3/6: 下载并安装最新版本..."
-        latest_version=$(get_latest_version)
+        latest_version=$(get_latest_version "shadowsocks/shadowsocks-rust")
         download_and_install "$latest_version" "$arch"
 
         info "步骤 4/6: 生成配置文件..."
-        generate_config "$ss_port" "$ss_password"
+        generate_config "$ss_port" "$ss_password" "$enable_obfs"
 
         info "步骤 5/6: 创建并启动服务..."
         create_systemd_service
