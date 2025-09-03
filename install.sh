@@ -5,14 +5,19 @@
 # Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：4.1
+# 版本：4.2
 # 描述：一个安全、健壮的 shadowsocks-rust 管理脚本。
+# 更新日志 (v4.2):
+# - [修复] 安全地调用 get_public_ip, 避免因 set -e 导致脚本在IP获取失败时意外退出。
+# - [优化] 在安装/启动服务后增加状态检查，确保服务成功运行，避免误报。
+# - [优化] 使用 base64 -w 0 进行编码，代码更清晰。
+# - [优化] 优化了主菜单流程，部分即时命令无需再按回车确认。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="4.1"
+readonly SCRIPT_VERSION="4.2"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -69,7 +74,9 @@ get_public_ip() {
         echo "[$ip]"
         success "成功获取公网 IPv6 地址。"
     else
-        error "无法获取公网IP地址，请检查网络连接。"
+        # 不使用 error, 而是返回1, 由调用者处理
+        warn "无法获取公网IP地址，请检查网络连接。"
+        return 1
     fi
 }
 
@@ -312,7 +319,14 @@ do_install() {
     create_systemd_service
     manage_service "start"
 
-    success "安装完成，shadowsocks-rust 已成功启动！"
+    info "等待服务启动并验证状态..."
+    sleep 2
+    if ! systemctl is-active --quiet ss-rust; then
+        warn "服务启动失败！请通过菜单选项 '7' 查看详细状态和日志。"
+    else
+        success "安装完成，shadowsocks-rust 已成功启动！"
+    fi
+
     view_config
 }
 
@@ -354,14 +368,15 @@ do_uninstall() {
     run_uninstall_logic
 }
 
-# --- [MODIFIED FUNCTION] ---
 view_config() {
     if [[ ! -f "$CONFIG_PATH" ]]; then
         error "找不到配置文件，请先执行安装。"
     fi
 
     local ip_address
-    ip_address=$(get_public_ip)
+    if ! ip_address=$(get_public_ip); then
+        error "无法获取IP以生成订阅链接，但您可以手动查看配置文件: $CONFIG_PATH"
+    fi
     
     local port password method node_name
     port=$(jq -r '.server_port' "$CONFIG_PATH")
@@ -370,16 +385,16 @@ view_config() {
     node_name="$(hostname) ss2022"
 
     local encoded_credentials
-    encoded_credentials=$(echo -n "${method}:${password}" | base64 | tr -d '\n')
+    encoded_credentials=$(echo -n "${method}:${password}" | base64 -w 0)
     local ss_link="ss://${encoded_credentials}@${ip_address}:${port}#${node_name}"
 
     {
         echo -e "\n--- Shadowsocks-2022 订阅信息 ---"
-        echo -e "  ${C_YELLOW}名称:${C_RESET}            ${node_name}"
-        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}        ${ip_address}"
-        echo -e "  ${C_YELLOW}端口:${C_RESET}            ${port}"
-        echo -e "  ${C_YELLOW}密码:${C_RESET}            ${password}"
-        echo -e "  ${C_YELLOW}加密方式:${C_RESET}        ${method}"
+        echo -e "  ${C_YELLOW}名称:${C_RESET}         ${node_name}"
+        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}   ${ip_address}"
+        echo -e "  ${C_YELLOW}端口:${C_RESET}         ${port}"
+        echo -e "  ${C_YELLOW}密码:${C_RESET}         ${password}"
+        echo -e "  ${C_YELLOW}加密方式:${C_RESET}     ${method}"
         echo "-----------------------------------"
         echo ""
         echo -e "  ${C_GREEN}SS 链接:${C_RESET} ${ss_link}"
@@ -392,7 +407,7 @@ main_menu() {
     while true; do
         clear
         echo -e "${C_GREEN}======================================================${C_RESET}"
-        echo -e "  ${C_BLUE}Shadowsocks-rust 管理脚本${C_RESET}"
+        echo -e "  ${C_BLUE}Shadowsocks-rust 管理脚本 (v${SCRIPT_VERSION})${C_RESET}"
         
         # --- 状态显示逻辑 ---
         local status_info
@@ -425,21 +440,24 @@ main_menu() {
 
         read -p "请输入您的选项 [0-8]: " choice
 
+        local needs_pause=true
         case "$choice" in
             1) do_install ;;
             2) do_update ;;
             3) do_uninstall ;;
-            4) manage_service "start"; success "启动命令已发送" ;;
-            5) manage_service "stop"; success "停止命令已发送" ;;
-            6) manage_service "restart"; success "重启命令已发送" ;;
-            7) manage_service "status" ;;
+            4) manage_service "start"; success "启动命令已发送"; needs_pause=false ;;
+            5) manage_service "stop"; success "停止命令已发送"; needs_pause=false ;;
+            6) manage_service "restart"; success "重启命令已发送"; needs_pause=false ;;
+            7) manage_service "status"; needs_pause=false ;;
             8) view_config ;;
             0) exit 0 ;;
-            *) error "无效的选项，请输入正确的数字。" ;;
+            *) warn "无效的选项，请输入正确的数字。" ;;
         esac
 
-        echo ""
-        read -p "按回车键返回主菜单..."
+        if [[ "$needs_pause" == "true" ]]; then
+            echo ""
+            read -p "按回车键返回主菜单..."
+        fi
     done
 }
 
@@ -489,6 +507,13 @@ main() {
         info "步骤 5/6: 创建并启动服务..."
         create_systemd_service
         manage_service "start"
+        
+        info "等待服务启动并验证状态..."
+        sleep 2
+        if ! systemctl is-active --quiet ss-rust; then
+            error "服务启动失败！请检查日志。"
+        fi
+        success "服务已成功启动！"
 
         info "步骤 6/6: 显示最终配置..."
         view_config
