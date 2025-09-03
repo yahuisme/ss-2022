@@ -5,19 +5,17 @@
 # Shadowsocks Rust 管理脚本
 #
 # 作者：yahuisme
-# 版本：4.2
+# 版本：4.4
 # 描述：一个安全、健壮的 shadowsocks-rust 管理脚本。
-# 更新日志 (v4.2):
-# - [修复] 安全地调用 get_public_ip, 避免因 set -e 导致脚本在IP获取失败时意外退出。
-# - [优化] 在安装/启动服务后增加状态检查，确保服务成功运行，避免误报。
-# - [优化] 使用 base64 -w 0 进行编码，代码更清晰。
-# - [优化] 优化了主菜单流程，部分即时命令无需再按回车确认。
+# 更新日志 (v4.4):
+# - [功能] 新增配置修改功能，允许用户在不重装的情况下更改端口和密码。
+# - [UI] 重新组织和编号了主菜单以集成新功能。
 # ===================================================================================
 
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="4.2"
+readonly SCRIPT_VERSION="4.4"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -74,7 +72,6 @@ get_public_ip() {
         echo "[$ip]"
         success "成功获取公网 IPv6 地址。"
     else
-        # 不使用 error, 而是返回1, 由调用者处理
         warn "无法获取公网IP地址，请检查网络连接。"
         return 1
     fi
@@ -181,6 +178,26 @@ download_and_install() {
     success "shadowsocks-rust v${version} 安装成功。"
 }
 
+# 抽离出独立的写配置函数，方便复用
+write_config() {
+    local port="$1"
+    local password="$2"
+
+    jq -n \
+        --argjson server_port "$port" \
+        --arg password "$password" \
+        --arg method "$ENCRYPTION_METHOD" \
+        '{
+            "server": "::",
+            "server_port": $server_port,
+            "password": $password,
+            "method": $method,
+            "fast_open": true,
+            "mode": "tcp_and_udp"
+        }' > "$CONFIG_PATH"
+}
+
+
 generate_config() {
     local port=${1:-}
     local password=${2:-}
@@ -223,19 +240,7 @@ generate_config() {
         fi
     fi
 
-    jq -n \
-        --argjson server_port "$port" \
-        --arg password "$password" \
-        --arg method "$ENCRYPTION_METHOD" \
-        '{
-            "server": "::",
-            "server_port": $server_port,
-            "password": $password,
-            "method": $method,
-            "fast_open": true,
-            "mode": "tcp_and_udp"
-        }' > "$CONFIG_PATH"
-
+    write_config "$port" "$password"
     success "配置文件已创建于 $CONFIG_PATH"
 }
 
@@ -277,6 +282,7 @@ manage_service() {
             else
                 info "正在执行: systemctl $1 ss-rust"
                 systemctl "$1" ss-rust
+                success "$1 命令已发送"
             fi
             ;;
         *)
@@ -322,7 +328,7 @@ do_install() {
     info "等待服务启动并验证状态..."
     sleep 2
     if ! systemctl is-active --quiet ss-rust; then
-        warn "服务启动失败！请通过菜单选项 '7' 查看详细状态和日志。"
+        warn "服务启动失败！请通过菜单选项 '6' 查看详细状态和日志。"
     else
         success "安装完成，shadowsocks-rust 已成功启动！"
     fi
@@ -348,8 +354,6 @@ do_update() {
     arch=$(detect_arch)
     download_and_install "$latest_version" "$arch"
     manage_service "restart"
-
-    success "更新完成。"
 }
 
 do_uninstall() {
@@ -366,6 +370,55 @@ do_uninstall() {
     fi
 
     run_uninstall_logic
+}
+
+do_modify_config() {
+    if [[ ! -f "$CONFIG_PATH" ]]; then
+        error "找不到配置文件，请先执行安装。"
+    fi
+
+    info "加载当前配置..."
+    local current_port=$(jq -r '.server_port' "$CONFIG_PATH")
+    local current_password=$(jq -r '.password' "$CONFIG_PATH")
+
+    info "请输入新配置 (直接回车则保留当前值)"
+    
+    local new_port new_password
+    while true; do
+        read -p "新端口 [1-65535] (当前: ${current_port}): " new_port
+        new_port=${new_port:-$current_port}
+        if [[ "$new_port" =~ ^[0-9]+$ && "$new_port" -ge 1 && "$new_port" -le 65535 ]]; then
+            break
+        else
+            warn "输入无效，请输入一个 1 到 65535 之间的数字。"
+        fi
+    done
+
+    read -p "新密码 (当前: ${current_password}, 留空保留, 输入 'random' 生成新的): " new_password_input
+    if [[ -z "$new_password_input" ]]; then
+        new_password=$current_password
+    elif [[ "$new_password_input" == "random" ]]; then
+        info "正在生成新的随机密码..."
+        new_password=$(openssl rand -base64 ${KEY_BYTES})
+        success "新密码: ${new_password}"
+    else
+        new_password=$new_password_input
+    fi
+
+    info "正在写入新配置..."
+    write_config "$new_port" "$new_password"
+
+    info "正在重启服务以应用新配置..."
+    manage_service "restart"
+    
+    sleep 1
+    if ! systemctl is-active --quiet ss-rust; then
+        warn "服务重启后未能成功运行！请通过菜单选项 '6' 查看状态。"
+    else
+        success "配置修改成功，服务已重启！"
+    fi
+
+    view_config
 }
 
 view_config() {
@@ -409,7 +462,6 @@ main_menu() {
         echo -e "${C_GREEN}======================================================${C_RESET}"
         echo -e "  ${C_BLUE}Shadowsocks-rust 管理脚本 (v${SCRIPT_VERSION})${C_RESET}"
         
-        # --- 状态显示逻辑 ---
         local status_info
         if [[ -f "$VERSION_FILE" ]]; then
             local version="v$(cat "$VERSION_FILE")"
@@ -429,35 +481,30 @@ main_menu() {
         echo -e "  ${C_YELLOW}2.${C_RESET} 更新 Shadowsocks-rust"
         echo -e "  ${C_YELLOW}3.${C_RESET} 卸载 Shadowsocks-rust"
         echo "  ------------------------------------"
-        echo -e "  ${C_YELLOW}4.${C_RESET} 启动服务"
-        echo -e "  ${C_YELLOW}5.${C_RESET} 停止服务"
-        echo -e "  ${C_YELLOW}6.${C_RESET} 重启服务"
-        echo -e "  ${C_YELLOW}7.${C_RESET} 查看服务状态"
+        echo -e "  ${C_YELLOW}4.${C_RESET} 修改配置 (端口/密码)"
+        echo -e "  ${C_YELLOW}5.${C_RESET} 重启服务"
+        echo -e "  ${C_YELLOW}6.${C_RESET} 查看服务状态"
         echo "  ------------------------------------"
-        echo -e "  ${C_YELLOW}8.${C_RESET} 查看配置信息"
+        echo -e "  ${C_YELLOW}7.${C_RESET} 查看配置信息"
         echo -e "  ${C_YELLOW}0.${C_RESET} 退出脚本"
         echo ""
 
-        read -p "请输入您的选项 [0-8]: " choice
+        read -p "请输入您的选项 [0-7]: " choice
 
-        local needs_pause=true
         case "$choice" in
             1) do_install ;;
             2) do_update ;;
             3) do_uninstall ;;
-            4) manage_service "start"; success "启动命令已发送"; needs_pause=false ;;
-            5) manage_service "stop"; success "停止命令已发送"; needs_pause=false ;;
-            6) manage_service "restart"; success "重启命令已发送"; needs_pause=false ;;
-            7) manage_service "status"; needs_pause=false ;;
-            8) view_config ;;
+            4) do_modify_config ;;
+            5) manage_service "restart" ;;
+            6) manage_service "status" ;;
+            7) view_config ;;
             0) exit 0 ;;
             *) warn "无效的选项，请输入正确的数字。" ;;
         esac
 
-        if [[ "$needs_pause" == "true" ]]; then
-            echo ""
-            read -p "按回车键返回主菜单..."
-        fi
+        echo ""
+        read -p "按回车键返回主菜单..."
     done
 }
 
