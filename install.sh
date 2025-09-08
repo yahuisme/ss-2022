@@ -6,14 +6,13 @@
 #
 # 作者：yahuisme
 # 版本：4.5
-# 描述：一个安全、简洁的 shadowsocks-rust 2022 一键安装管理脚本。
+# 描述：一个安全、简洁的 shadowsocks-rust 一键安装管理脚本。
 # 
 # 核心优化 (v4.5):
 # - [安全] 修复密码验证逻辑漏洞，所有模式下都进行格式验证
 # - [安全] 配置文件权限设置为 600，仅 root 可访问
 # - [安全] 增强网络请求安全性，添加重试和超时控制
 # - [功能] 添加端口冲突检查
-# - [代码] 消除魔法数字，提高代码可维护性
 # - [简化] 移除非必要功能，专注核心管理功能
 # ===================================================================================
 
@@ -520,18 +519,15 @@ do_update() {
 }
 
 do_uninstall() {
-    info "准备卸载 shadowsocks-rust..."
     if [[ ! -f "$BINARY_PATH" && ! -d "$INSTALL_DIR" ]]; then
         warn "未发现任何 shadowsocks-rust 相关文件，无需卸载。"
         return
     fi
 
-    if [[ "${non_interactive:-false}" != "true" ]]; then
-        read -p "您确定要卸载 shadowsocks-rust 吗? (y/N): " choice
-        if [[ ! "$choice" =~ ^[Yy]$ ]]; then
-            info "已取消卸载操作。"
-            return
-        fi
+    read -p "您确定要完全卸载 shadowsocks-rust 吗? (Y/n): " choice
+    if [[ "$choice" =~ ^[Nn]$ ]]; then
+        info "已取消卸载操作。"
+        return
     fi
 
     run_uninstall_logic
