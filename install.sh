@@ -1,21 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034,SC2155
 
-# ===================================================================================
 # Shadowsocks Rust 2022 安装管理脚本
-#
-# 作者：yahuisme
-# 版本：4.5
-# 描述：一个安全、简洁的 shadowsocks-rust 一键安装管理脚本。
-#
-# 核心优化 (v4.5):
-# - [安全] 修复密码验证逻辑漏洞，所有模式下都进行格式验证
-# - [安全] 配置文件权限设置为 600，仅 root 可访问
-# - [安全] 增强网络请求安全性，添加重试和超时控制
-# - [功能] 添加端口冲突检查
-# - [简化] 移除非必要功能，专注核心管理功能
-# - [v4.5] 简化卸载流程，默认直接删除所有文件，不再二次询问
-# ===================================================================================
+# 安装、更新、卸载、配置和 systemd 服务管理。
 
 set -euo pipefail
 
@@ -48,10 +35,9 @@ readonly C_GREEN='\033[0;32m'
 readonly C_YELLOW='\033[1;33m'
 readonly C_BLUE='\033[0;34m'
 
-# --- 创建并注册临时目录清理函数 ---
+# --- 临时目录和失败恢复 ---
 readonly TMP_DIR=$(mktemp -d -t ss-rust.XXXXXX)
 
-# *** 修正点 1: cleanup 函数定义必须在 trap 之前 ***
 cleanup() {
     if [[ -d "$TMP_DIR" ]]; then
         rm -rf "$TMP_DIR"
@@ -576,6 +562,25 @@ run_uninstall_logic() {
     success "卸载完成。"
 }
 
+install_flow() {
+    local configure="$1" port="${2:-}" password="${3:-}" method="${4:-$DEFAULT_ENCRYPTION_METHOD}" version="${5:-}"
+    local os_type arch
+
+    os_type=$(detect_os)
+    check_dependencies "$os_type"
+    arch=$(detect_arch)
+    backup_install_state
+    version=${version:-$(get_latest_version)}
+    download_and_install "$version" "$arch"
+
+    if [[ "$configure" == true ]]; then
+        generate_config "$port" "$password" "$method"
+    fi
+    create_systemd_service
+    manage_service "restart"
+    INSTALL_COMMITTED=true
+}
+
 do_install() {
     if [[ -f "$BINARY_PATH" ]]; then
         warn "检测到 shadowsocks-rust 已安装。"
@@ -587,18 +592,7 @@ do_install() {
         info "将覆盖现有安装..."
     fi
 
-    local os_type arch latest_version
-    os_type=$(detect_os)
-    check_dependencies "$os_type"
-    arch=$(detect_arch)
-    latest_version=$(get_latest_version)
-
-    backup_install_state
-    download_and_install "$latest_version" "$arch"
-    generate_config
-    create_systemd_service
-    manage_service "restart"
-    INSTALL_COMMITTED=true
+    install_flow true
 
     success "安装完成，shadowsocks-rust 已成功启动！"
     view_config
@@ -609,7 +603,7 @@ do_update() {
         error "shadowsocks-rust 未安装。请先执行安装。"
     fi
 
-    local current_version latest_version arch os_type
+    local current_version latest_version os_type
     current_version=$(cat "$VERSION_FILE" 2>/dev/null || echo "unknown")
     os_type=$(detect_os)
     check_dependencies "$os_type"
@@ -622,14 +616,7 @@ do_update() {
 
     info "发现新版本，准备从 v$current_version 更新到 v$latest_version..."
     
-    arch=$(detect_arch)
-    backup_install_state
-    download_and_install "$latest_version" "$arch"
-    
-    info "正在重启服务以应用更新..."
-    manage_service "restart"
-    INSTALL_COMMITTED=true
-    
+    install_flow false "" "" "$DEFAULT_ENCRYPTION_METHOD" "$latest_version"
     success "更新完成！"
 }
 
@@ -648,29 +635,27 @@ do_uninstall() {
     run_uninstall_logic
 }
 
-do_modify_config() {
-    if [[ ! -f "$CONFIG_PATH" ]]; then
-        error "找不到配置文件，请先执行安装。"
+load_config() {
+    [[ -f "$CONFIG_PATH" ]] || error "找不到配置文件，请先执行安装。"
+    if ! config_values=$(jq -er '[.server_port, .password, .method] | @tsv' "$CONFIG_PATH" 2>/dev/null); then
+        error "配置文件格式错误，无法读取必要信息。"
     fi
+    IFS=$'\t' read -r current_port current_password current_method <<< "$config_values"
+    [[ -n "$current_port" && -n "$current_password" && -n "$current_method" ]] || \
+        error "配置文件格式错误，无法读取必要信息。"
+}
 
+do_modify_config() {
     info "加载当前配置..."
-    local current_port current_password current_method key_bytes
-    current_port=$(jq -r '.server_port' "$CONFIG_PATH" 2>/dev/null || echo "")
-    current_password=$(jq -r '.password' "$CONFIG_PATH" 2>/dev/null || echo "")
-    current_method=$(jq -r '.method' "$CONFIG_PATH" 2>/dev/null || echo "$DEFAULT_ENCRYPTION_METHOD")
+    local current_port current_password current_method key_bytes new_port new_password
+    load_config
     key_bytes=$(get_key_bytes "$current_method")
-    
-    if [[ -z "$current_port" || -z "$current_password" ]]; then
-        error "无法读取当前配置，配置文件可能已损坏。"
-    fi
 
     info "当前配置："
     info "  端口: $current_port"
     info "  密码: $current_password"
     echo ""
     info "请输入新配置 (直接回车则保留当前值)"
-    
-    local new_port new_password
     
     # 端口输入和验证
     while true; do
@@ -733,20 +718,12 @@ generate_ss_url() {
 }
 
 view_config() {
-    if [[ ! -f "$CONFIG_PATH" ]]; then
-        error "找不到配置文件，请先执行安装。"
-    fi
-
     local ip_address=""
-    local port password method node_name
-    port=$(jq -r '.server_port' "$CONFIG_PATH" 2>/dev/null)
-    password=$(jq -r '.password' "$CONFIG_PATH" 2>/dev/null)
-    method=$(jq -r '.method' "$CONFIG_PATH" 2>/dev/null)
-    
-    if [[ -z "$port" || -z "$password" || -z "$method" ]]; then
-        error "配置文件格式错误，无法读取必要信息。"
-    fi
-    
+    local port password method node_name ss_link
+    load_config
+    port="$current_port"
+    password="$current_password"
+    method="$current_method"
     node_name="$(hostname)-ss2022"
 
     if ! ip_address=$(get_public_ip); then
@@ -770,7 +747,6 @@ view_config() {
         echo -e "${C_GREEN}======================================${C_RESET}"
         echo ""
         if [[ -n "$ip_address" ]]; then
-            local ss_link
             ss_link=$(generate_ss_url "$ip_address" "$port" "$password" "$method" "$node_name")
             echo -e "  ${C_GREEN}SS链接:${C_RESET}"
             echo -e "  ${ss_link}"
@@ -893,7 +869,7 @@ Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
 选项:
   -p, --port <端口>     指定端口 (1-65535)
   -w, --password <密码> 指定 Base64 编码的密钥
-  -m, --method <方式>   AES-128-GCM 或 ChaCha20-Poly1305
+  -m, --method <方式>   2022-blake3-aes-128-gcm 或 2022-blake3-chacha20-poly1305
   -f, --force           强制重新安装 (覆盖现有安装)
   -h, --help            显示此帮助信息
 
@@ -936,27 +912,10 @@ EOF
             error "shadowsocks-rust 已安装。使用 --force 参数强制重新安装。"
         fi
 
-        info "步骤 1/5: 环境检测与依赖安装..."
-        local os_type arch latest_version
-        os_type=$(detect_os)
-        check_dependencies "$os_type"
-        arch=$(detect_arch)
+        info "开始检查依赖、下载并安装..."
+        install_flow true "$ss_port" "$ss_password" "$ss_method"
 
-        backup_install_state
-
-        info "步骤 2/5: 下载并安装最新版本..."
-        latest_version=$(get_latest_version)
-        download_and_install "$latest_version" "$arch"
-
-        info "步骤 3/5: 生成配置文件..."
-        generate_config "$ss_port" "$ss_password" "$ss_method"
-
-        info "步骤 4/5: 创建并启动服务..."
-        create_systemd_service
-        manage_service "restart"
-        INSTALL_COMMITTED=true
-
-        info "步骤 5/5: 显示最终配置..."
+        info "显示最终配置..."
         view_config
 
         success "=== 一键安装完成 ==="
