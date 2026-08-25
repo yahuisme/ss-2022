@@ -6,6 +6,7 @@
 
 - 支持 Debian、Ubuntu、CentOS
 - 支持 `x86_64`、`aarch64`、`armv7l`
+- 支持 `2022-blake3-aes-128-gcm` 和 `2022-blake3-chacha20-poly1305`
 - 支持交互式和无交互安装
 - 自动创建 systemd 服务
 - 自动校验下载文件的 SHA-256
@@ -23,17 +24,24 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/i
 
 ## 无交互安装
 
-默认使用 `2022-blake3-aes-128-gcm`，密码必须是 **16 字节密钥的 Base64 编码**：
+默认使用 `2022-blake3-aes-128-gcm`，也支持 `2022-blake3-chacha20-poly1305`。密钥必须是对应长度的 Base64 编码：AES-128 为 16 字节，ChaCha20 为 32 字节。
 
 ```bash
-PASSWORD="$(openssl rand -base64 16)" && sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD"
+PASSWORD="$(openssl rand -base64 16)" && sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-aes-128-gcm
+```
+
+使用 ChaCha20：
+
+```bash
+PASSWORD="$(openssl rand -base64 32)" && sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-chacha20-poly1305
 ```
 
 参数：
 
 ```text
 -p, --port <端口>       端口，范围 1-65535
--w, --password <密码>   16 字节密钥的 Base64 编码
+-w, --password <密码>   指定 Base64 编码的密钥
+-m, --method <方式>     AES-128-GCM 或 ChaCha20-Poly1305
 -f, --force             强制重新安装
 -h, --help              显示帮助
 ```

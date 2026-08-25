@@ -28,8 +28,9 @@ readonly VERSION_FILE="${INSTALL_DIR}/ver.txt"
 readonly SYSTEMD_SERVICE_FILE="/etc/systemd/system/ss-rust.service"
 
 # --- 加密配置常量 ---
-readonly ENCRYPTION_METHOD="2022-blake3-aes-128-gcm"
-readonly KEY_BYTES=16
+readonly DEFAULT_ENCRYPTION_METHOD="2022-blake3-aes-128-gcm"
+readonly AES_KEY_BYTES=16
+readonly CHACHA_KEY_BYTES=32
 readonly DEFAULT_PORT=8388
 readonly MIN_PORT=1
 readonly MAX_PORT=65535
@@ -108,6 +109,7 @@ check_port_available() {
 # --- 密码验证函数 ---
 validate_password() {
     local password="$1"
+    local key_bytes="$2"
     
     # 检查是否为有效的 Base64
     if ! echo "$password" | base64 -d >/dev/null 2>&1; then
@@ -117,9 +119,17 @@ validate_password() {
     # 检查解码后的长度
     local decoded_len
     decoded_len=$(echo "$password" | base64 -d 2>/dev/null | wc -c)
-    if [[ "$decoded_len" -ne "$KEY_BYTES" ]]; then
-        error "密码解码后的长度必须为 ${KEY_BYTES} 字节，当前为 ${decoded_len} 字节。"
+    if [[ "$decoded_len" -ne "$key_bytes" ]]; then
+        error "密码解码后的长度必须为 ${key_bytes} 字节，当前为 ${decoded_len} 字节。"
     fi
+}
+
+get_key_bytes() {
+    case "$1" in
+        2022-blake3-aes-128-gcm) echo "$AES_KEY_BYTES" ;;
+        2022-blake3-chacha20-poly1305) echo "$CHACHA_KEY_BYTES" ;;
+        *) error "不支持的加密方式: $1" ;;
+    esac
 }
 
 get_public_ip() {
@@ -311,6 +321,7 @@ download_and_install() {
 write_config() {
     local port="$1"
     local password="$2"
+    local method="$3"
     
     # 确保安装目录存在
     mkdir -p "$INSTALL_DIR"
@@ -319,7 +330,7 @@ write_config() {
     jq -n \
         --argjson server_port "$port" \
         --arg password "$password" \
-        --arg method "$ENCRYPTION_METHOD" \
+        --arg method "$method" \
         '{
             "server": "::",
             "server_port": $server_port,
@@ -339,9 +350,18 @@ write_config() {
 generate_config() {
     local port=${1:-}
     local password=${2:-}
+    local method=${3:-$DEFAULT_ENCRYPTION_METHOD}
+    local key_bytes
+
+    if [[ -z "${3:-}" && -z "$port" ]]; then
+        read -p "加密方式 [1: AES-128-GCM, 2: ChaCha20-Poly1305] (默认: 1): " method_choice
+        [[ "$method_choice" == "2" ]] && method="2022-blake3-chacha20-poly1305"
+        [[ -z "$method_choice" || "$method_choice" == "1" ]] || error "无效的加密方式选项"
+    fi
+    key_bytes=$(get_key_bytes "$method")
 
     info "正在生成配置文件..."
-    info "使用加密方式: ${ENCRYPTION_METHOD}"
+    info "使用加密方式: ${method}"
 
     # 端口验证和输入
     if [[ -z "$port" ]]; then
@@ -367,20 +387,20 @@ generate_config() {
     if [[ -z "$password" ]]; then
         read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input
         if [[ -z "$password_input" ]]; then
-            info "为 ${ENCRYPTION_METHOD} 生成 ${KEY_BYTES} 字节随机密码..."
-            password=$(openssl rand -base64 ${KEY_BYTES})
+            info "为 ${method} 生成 ${key_bytes} 字节随机密码..."
+            password=$(openssl rand -base64 "$key_bytes")
             success "已生成随机密码。"
         else
             password=$password_input
-            validate_password "$password"
+            validate_password "$password" "$key_bytes"
         fi
     else
         info "使用指定的密码。"
-        validate_password "$password"
+        validate_password "$password" "$key_bytes"
     fi
     
     # 写入新配置
-    write_config "$port" "$password"
+    write_config "$port" "$password" "$method"
     success "配置文件已创建于 $CONFIG_PATH"
 }
 
@@ -545,9 +565,11 @@ do_modify_config() {
     fi
 
     info "加载当前配置..."
-    local current_port current_password
+    local current_port current_password current_method key_bytes
     current_port=$(jq -r '.server_port' "$CONFIG_PATH" 2>/dev/null || echo "")
     current_password=$(jq -r '.password' "$CONFIG_PATH" 2>/dev/null || echo "")
+    current_method=$(jq -r '.method' "$CONFIG_PATH" 2>/dev/null || echo "$DEFAULT_ENCRYPTION_METHOD")
+    key_bytes=$(get_key_bytes "$current_method")
     
     if [[ -z "$current_port" || -z "$current_password" ]]; then
         error "无法读取当前配置，配置文件可能已损坏。"
@@ -581,11 +603,11 @@ do_modify_config() {
         new_password=$current_password
     elif [[ "$new_password_input" == "random" ]]; then
         info "正在生成新的随机密码..."
-        new_password=$(openssl rand -base64 ${KEY_BYTES})
+        new_password=$(openssl rand -base64 "$key_bytes")
         success "新密码: ${new_password}"
     else
         new_password=$new_password_input
-        validate_password "$new_password"
+        validate_password "$new_password" "$key_bytes"
     fi
 
     # 检查是否有变化
@@ -596,7 +618,7 @@ do_modify_config() {
 
     # 写入新配置
     info "正在写入新配置..."
-    write_config "$new_port" "$new_password"
+    write_config "$new_port" "$new_password" "$current_method"
 
     info "正在重启服务以应用新配置..."
     manage_service "restart"
@@ -721,6 +743,7 @@ main() {
 
     local ss_port=""
     local ss_password=""
+    local ss_method="$DEFAULT_ENCRYPTION_METHOD"
     local force_install=false
 
     # 参数解析
@@ -740,6 +763,14 @@ main() {
                 ss_password="$2"
                 shift 2
                 ;;
+            -m|--method)
+                if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
+                    error "参数 $1 需要指定加密方式"
+                fi
+                get_key_bytes "$2" >/dev/null
+                ss_method="$2"
+                shift 2
+                ;;
             -f|--force)
                 force_install=true
                 shift
@@ -753,7 +784,8 @@ Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
 
 选项:
   -p, --port <端口>     指定端口 (1-65535)
-  -w, --password <密码> 指定 Base64 编码的密码
+  -w, --password <密码> 指定 Base64 编码的密钥
+  -m, --method <方式>   AES-128-GCM 或 ChaCha20-Poly1305
   -f, --force           强制重新安装 (覆盖现有安装)
   -h, --help            显示此帮助信息
 
@@ -761,9 +793,12 @@ Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
   # 交互式安装
   $0
   
-  # 一键安装 (指定端口和随机密码)
+  # 一键安装 (指定端口和随机密码，默认 AES-128-GCM)
   $0 --port 8388 --password \$(openssl rand -base64 16)
-  
+
+  # 使用 ChaCha20-Poly1305
+  $0 --port 8388 --password \$(openssl rand -base64 32) --method 2022-blake3-chacha20-poly1305
+
   # 强制重新安装
   $0 --port 8388 --password <base64_password> --force
 
@@ -786,7 +821,7 @@ EOF
             error "端口 $ss_port 无效，必须在 ${MIN_PORT}-${MAX_PORT} 范围内"
         fi
         
-        validate_password "$ss_password"
+        validate_password "$ss_password" "$(get_key_bytes "$ss_method")"
 
         # 检查是否已安装
         if [[ -f "$BINARY_PATH" && "$force_install" != true ]]; then
@@ -809,7 +844,7 @@ EOF
         download_and_install "$latest_version" "$arch"
 
         info "步骤 4/6: 生成配置文件..."
-        generate_config "$ss_port" "$ss_password"
+        generate_config "$ss_port" "$ss_password" "$ss_method"
 
         info "步骤 5/6: 创建并启动服务..."
         create_systemd_service
