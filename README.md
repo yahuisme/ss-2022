@@ -17,23 +17,25 @@
 直接运行：
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh)
 ```
 
 脚本需要 root 权限，首次运行后选择菜单中的 `1` 安装。运行前需要系统已安装 `curl`。
+
+如果当前终端已经是 root（提示符通常以 `root@` 开头），直接使用上面的 `bash <(curl ...)` 命令即可。如果当前用户不是 root，请先执行 `sudo -i` 切换到 root shell，再运行该命令。不要写成 `sudo bash <(curl ...)`：进程替换生成的 `/dev/fd/*` 由当前 Shell 创建，`sudo` 可能无法访问，导致 `/dev/fd/*: No such file or directory`。
 
 ## 无交互安装
 
 使用 `2022-blake3-aes-128-gcm`，密钥 Base64 编码 16 字节。
 
 ```bash
-PASSWORD="$(openssl rand -base64 16)" && sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-aes-128-gcm
+PASSWORD="$(openssl rand -base64 16)" && bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-aes-128-gcm
 ```
 
 使用 `2022-blake3-chacha20-poly1305`，密钥 Base64 编码 32 字节。
 
 ```bash
-PASSWORD="$(openssl rand -base64 32)" && sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-chacha20-poly1305
+PASSWORD="$(openssl rand -base64 32)" && bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-chacha20-poly1305
 ```
 
 参数：
@@ -51,7 +53,7 @@ PASSWORD="$(openssl rand -base64 32)" && sudo bash <(curl -fsSL https://raw.gith
 不带参数重新运行上面的一键命令即可进入管理菜单：
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh)
 ```
 
 服务管理：
