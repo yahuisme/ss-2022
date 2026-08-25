@@ -737,14 +737,7 @@ view_config() {
         error "找不到配置文件，请先执行安装。"
     fi
 
-    local ip_address
-    if ! ip_address=$(get_public_ip); then
-        warn "无法获取公网IP地址，订阅链接将无法生成。"
-        # *** 修正点 2: 移除了 ' __ ' 拼写错误 ***
-        info "您可以手动查看配置文件: $CONFIG_PATH"
-        return
-    fi
-    
+    local ip_address=""
     local port password method node_name
     port=$(jq -r '.server_port' "$CONFIG_PATH" 2>/dev/null)
     password=$(jq -r '.password' "$CONFIG_PATH" 2>/dev/null)
@@ -756,8 +749,9 @@ view_config() {
     
     node_name="$(hostname)-ss2022"
 
-    local ss_link
-    ss_link=$(generate_ss_url "$ip_address" "$port" "$password" "$method" "$node_name")
+    if ! ip_address=$(get_public_ip); then
+        warn "无法获取公网 IP，将只显示本地配置。"
+    fi
 
     {
         echo ""
@@ -765,14 +759,24 @@ view_config() {
         echo -e "  ${C_BLUE}Shadowsocks-2022 配置信息${C_RESET}"
         echo -e "${C_GREEN}======================================${C_RESET}"
         echo -e "  ${C_YELLOW}节点名称:${C_RESET}       ${node_name}"
-        echo -e "  ${C_YELLOW}服务器地址:${C_RESET}     ${ip_address}"
+        if [[ -n "$ip_address" ]]; then
+            echo -e "  ${C_YELLOW}服务器地址:${C_RESET}     ${ip_address}"
+        else
+            echo -e "  ${C_YELLOW}服务器地址:${C_RESET}     请手动填写服务器地址"
+        fi
         echo -e "  ${C_YELLOW}端口:${C_RESET}           ${port}"
         echo -e "  ${C_YELLOW}密码:${C_RESET}           ${password}"
         echo -e "  ${C_YELLOW}加密方式:${C_RESET}       ${method}"
         echo -e "${C_GREEN}======================================${C_RESET}"
         echo ""
-        echo -e "  ${C_GREEN}SS链接:${C_RESET}"
-        echo -e "  ${ss_link}"
+        if [[ -n "$ip_address" ]]; then
+            local ss_link
+            ss_link=$(generate_ss_url "$ip_address" "$port" "$password" "$method" "$node_name")
+            echo -e "  ${C_GREEN}SS链接:${C_RESET}"
+            echo -e "  ${ss_link}"
+        else
+            echo -e "  ${C_YELLOW}SS链接:${C_RESET} 无法生成，请手动填写服务器地址"
+        fi
         echo ""
         echo -e "  ${C_BLUE}提示:${C_RESET} 复制上面的SS链接导入到客户端即可使用"
         echo -e "${C_GREEN}======================================${C_RESET}"

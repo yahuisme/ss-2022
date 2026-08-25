@@ -41,7 +41,7 @@ PASSWORD="$(openssl rand -base64 32)" && sudo bash <(curl -fsSL https://raw.gith
 ```text
 -p, --port <端口>       端口，范围 1-65535
 -w, --password <密码>   指定 Base64 编码的密钥
--m, --method <方式>     AES-128-GCM 或 ChaCha20-Poly1305
+-m, --method <方式>     2022-blake3-aes-128-gcm 或 2022-blake3-chacha20-poly1305
 -f, --force             强制重新安装
 -h, --help              显示帮助
 ```
