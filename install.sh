@@ -258,7 +258,7 @@ check_dependencies() {
         if [[ "${non_interactive:-false}" == "true" ]]; then
             info "将在非交互模式下自动安装..."
         else
-            read -p "是否需要现在自动安装它们? (Y/n): " choice
+            read -p "是否需要现在自动安装它们? (Y/n): " choice < /dev/tty
             if [[ "$choice" =~ ^[Nn]$ ]]; then
                 error "缺少必要的依赖，脚本无法继续运行。"
             fi
@@ -417,7 +417,7 @@ generate_config() {
     local key_bytes
 
     if [[ -z "${3:-}" && -z "$port" ]]; then
-        read -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (默认: 1): " method_choice
+        read -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (默认: 1): " method_choice < /dev/tty
         [[ "$method_choice" == "2" ]] && method="2022-blake3-chacha20-poly1305"
         [[ -z "$method_choice" || "$method_choice" == "1" ]] || error "无效的加密方式选项"
     fi
@@ -429,7 +429,7 @@ generate_config() {
     # 端口验证和输入
     if [[ -z "$port" ]]; then
         while true; do
-            read -p "请输入 Shadowsocks 端口 [${MIN_PORT}-${MAX_PORT}] (默认: ${DEFAULT_PORT}): " port
+            read -p "请输入 Shadowsocks 端口 [${MIN_PORT}-${MAX_PORT}] (默认: ${DEFAULT_PORT}): " port < /dev/tty
             port=${port:-$DEFAULT_PORT}
             if [[ "$port" =~ ^[0-9]+$ && "$port" -ge $MIN_PORT && "$port" -le $MAX_PORT ]]; then
                 check_port_available "$port"
@@ -448,7 +448,7 @@ generate_config() {
 
     # 密码验证和输入
     if [[ -z "$password" ]]; then
-        read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input
+        read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input < /dev/tty
         if [[ -z "$password_input" ]]; then
             info "为 ${method} 生成 ${key_bytes} 字节随机密码..."
             password=$(openssl rand -base64 "$key_bytes")
@@ -589,7 +589,7 @@ install_flow() {
 do_install() {
     if [[ -f "$BINARY_PATH" ]]; then
         warn "检测到 shadowsocks-rust 已安装。"
-        read -p "是否要重新安装? (y/N): " choice
+        read -p "是否要重新安装? (y/N): " choice < /dev/tty
         if [[ ! "$choice" =~ ^[Yy]$ ]]; then
             info "安装已取消。"
             return
@@ -631,7 +631,7 @@ do_uninstall() {
         return
     fi
 
-    read -p "您确定要完全卸载 shadowsocks-rust 吗? (Y/n): " choice
+    read -p "您确定要完全卸载 shadowsocks-rust 吗? (Y/n): " choice < /dev/tty
     if [[ "$choice" =~ ^[Nn]$ ]]; then
         info "已取消卸载操作。"
         return
@@ -665,7 +665,7 @@ do_modify_config() {
 
     local new_method method_choice
     while true; do
-        read -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (当前: ${current_method}, 回车保留): " method_choice
+        read -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (当前: ${current_method}, 回车保留): " method_choice < /dev/tty
         if [[ -z "$method_choice" ]]; then
             new_method="$current_method"
             break
@@ -683,7 +683,7 @@ do_modify_config() {
 
     # 端口输入和验证
     while true; do
-        read -p "新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${current_port}): " new_port
+        read -p "新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${current_port}): " new_port < /dev/tty
         new_port=${new_port:-$current_port}
         if [[ "$new_port" =~ ^[0-9]+$ && "$new_port" -ge $MIN_PORT && "$new_port" -le $MAX_PORT ]]; then
             if [[ "$new_port" != "$current_port" ]]; then
@@ -696,7 +696,7 @@ do_modify_config() {
     done
 
     # 密码输入和验证
-    read -p "新密码 (当前: ${current_password}, 留空保留; 切换加密方式时留空将重新生成, 输入 'random' 生成新的): " new_password_input
+    read -p "新密码 (当前: ${current_password}, 留空保留; 切换加密方式时留空将重新生成, 输入 'random' 生成新的): " new_password_input < /dev/tty
     if [[ -z "$new_password_input" ]]; then
         if [[ "$new_method" != "$current_method" ]]; then
             info "加密方式已更改，正在生成符合新加密方式的随机密码..."
@@ -825,7 +825,7 @@ main_menu() {
         echo -e "  ${C_YELLOW}0.${C_RESET} 退出脚本"
         echo ""
 
-        read -p "请输入您的选项 [0-9]: " choice
+        read -p "请输入您的选项 [0-9]: " choice < /dev/tty
 
         case "$choice" in
             1) do_install ;;
@@ -847,7 +847,7 @@ main_menu() {
         esac
 
         echo ""
-        read -p "按回车键返回主菜单..."
+        read -p "按回车键返回主菜单..." < /dev/tty
     done
 }
 
