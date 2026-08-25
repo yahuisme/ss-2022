@@ -417,7 +417,7 @@ generate_config() {
     local key_bytes
 
     if [[ -z "${3:-}" && -z "$port" ]]; then
-        read -p "加密方式 [1: AES-128-GCM, 2: ChaCha20-Poly1305] (默认: 1): " method_choice
+        read -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (默认: 1): " method_choice
         [[ "$method_choice" == "2" ]] && method="2022-blake3-chacha20-poly1305"
         [[ -z "$method_choice" || "$method_choice" == "1" ]] || error "无效的加密方式选项"
     fi
@@ -574,7 +574,12 @@ install_flow() {
     download_and_install "$version" "$arch"
 
     if [[ "$configure" == true ]]; then
-        generate_config "$port" "$password" "$method"
+        if [[ -n "$port" || -n "$password" ]]; then
+            generate_config "$port" "$password" "$method"
+        else
+            # 交互安装必须不传第三个参数，否则 generate_config 会误判为已指定加密方式。
+            generate_config
+        fi
     fi
     create_systemd_service
     manage_service "restart"
@@ -654,9 +659,28 @@ do_modify_config() {
     info "当前配置："
     info "  端口: $current_port"
     info "  密码: $current_password"
+    info "  加密方式: $current_method"
     echo ""
     info "请输入新配置 (直接回车则保留当前值)"
-    
+
+    local new_method method_choice
+    while true; do
+        read -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (当前: ${current_method}, 回车保留): " method_choice
+        if [[ -z "$method_choice" ]]; then
+            new_method="$current_method"
+            break
+        elif [[ "$method_choice" = "1" ]]; then
+            new_method="2022-blake3-aes-128-gcm"
+            break
+        elif [[ "$method_choice" = "2" ]]; then
+            new_method="2022-blake3-chacha20-poly1305"
+            break
+        else
+            warn "无效的加密方式选项，请输入 1、2 或直接回车。"
+        fi
+    done
+    key_bytes=$(get_key_bytes "$new_method")
+
     # 端口输入和验证
     while true; do
         read -p "新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${current_port}): " new_port
@@ -672,9 +696,15 @@ do_modify_config() {
     done
 
     # 密码输入和验证
-    read -p "新密码 (当前: ${current_password}, 留空保留, 输入 'random' 生成新的): " new_password_input
+    read -p "新密码 (当前: ${current_password}, 留空保留; 切换加密方式时留空将重新生成, 输入 'random' 生成新的): " new_password_input
     if [[ -z "$new_password_input" ]]; then
-        new_password=$current_password
+        if [[ "$new_method" != "$current_method" ]]; then
+            info "加密方式已更改，正在生成符合新加密方式的随机密码..."
+            new_password=$(openssl rand -base64 "$key_bytes")
+            success "已生成新的随机密码。"
+        else
+            new_password=$current_password
+        fi
     elif [[ "$new_password_input" == "random" ]]; then
         info "正在生成新的随机密码..."
         new_password=$(openssl rand -base64 "$key_bytes")
@@ -685,7 +715,7 @@ do_modify_config() {
     fi
 
     # 检查是否有变化
-    if [[ "$new_port" == "$current_port" && "$new_password" == "$current_password" ]]; then
+    if [[ "$new_port" == "$current_port" && "$new_password" == "$current_password" && "$new_method" == "$current_method" ]]; then
         info "配置无变化，操作已取消。"
         return
     fi
@@ -693,7 +723,7 @@ do_modify_config() {
     # 写入新配置
     backup_install_state
     info "正在写入新配置..."
-    write_config "$new_port" "$new_password" "$current_method"
+    write_config "$new_port" "$new_password" "$new_method"
 
     info "正在重启服务以应用新配置..."
     manage_service "restart"
