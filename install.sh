@@ -38,7 +38,8 @@ readonly MAX_PORT=65535
 # --- 网络配置常量 ---
 readonly NETWORK_TIMEOUT=10
 readonly MAX_RETRIES=3
-readonly SERVICE_START_WAIT=2
+readonly SERVICE_START_WAIT=1
+readonly SERVICE_START_ATTEMPTS=5
 
 # --- 颜色定义 ---
 readonly C_RESET='\033[0m'
@@ -57,7 +58,66 @@ cleanup() {
     fi
 }
 
-trap 'cleanup' EXIT INT TERM
+BACKUP_ACTIVE=false
+INSTALL_COMMITTED=false
+
+restore_install_state() {
+    [[ "$BACKUP_ACTIVE" == true ]] || return 0
+
+    if [[ -f "${TMP_DIR}/old-binary" ]]; then
+        install -m 755 "${TMP_DIR}/old-binary" "$BINARY_PATH" 2>/dev/null || true
+    else
+        rm -f "$BINARY_PATH" 2>/dev/null || true
+    fi
+    if [[ -f "${TMP_DIR}/old-version" ]]; then
+        install -m 644 "${TMP_DIR}/old-version" "$VERSION_FILE" 2>/dev/null || true
+    else
+        rm -f "$VERSION_FILE" 2>/dev/null || true
+    fi
+    if [[ -f "${TMP_DIR}/old-config" ]]; then
+        install -m 600 "${TMP_DIR}/old-config" "$CONFIG_PATH" 2>/dev/null || true
+    else
+        rm -f "$CONFIG_PATH" 2>/dev/null || true
+    fi
+    if [[ -f "${TMP_DIR}/old-service" ]]; then
+        install -m 644 "${TMP_DIR}/old-service" "$SYSTEMD_SERVICE_FILE" 2>/dev/null || true
+    else
+        rm -f "$SYSTEMD_SERVICE_FILE" 2>/dev/null || true
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        if [[ -f "${TMP_DIR}/old-service" && -f "${TMP_DIR}/was-active" ]]; then
+            systemctl restart ss-rust >/dev/null 2>&1 || true
+        elif [[ -f "${TMP_DIR}/old-service" ]]; then
+            systemctl stop ss-rust >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+on_exit() {
+    local status=$?
+    if [[ $status -ne 0 && "$BACKUP_ACTIVE" == true && "$INSTALL_COMMITTED" != true ]]; then
+        warn "操作失败，正在恢复原有安装..."
+        restore_install_state
+    fi
+    cleanup
+    return "$status"
+}
+
+trap 'on_exit' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+backup_install_state() {
+    BACKUP_ACTIVE=true
+    if [[ -f "$BINARY_PATH" ]]; then cp -p "$BINARY_PATH" "${TMP_DIR}/old-binary"; fi
+    if [[ -f "$VERSION_FILE" ]]; then cp -p "$VERSION_FILE" "${TMP_DIR}/old-version"; fi
+    if [[ -f "$CONFIG_PATH" ]]; then cp -p "$CONFIG_PATH" "${TMP_DIR}/old-config"; fi
+    if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then cp -p "$SYSTEMD_SERVICE_FILE" "${TMP_DIR}/old-service"; fi
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet ss-rust 2>/dev/null; then
+        : > "${TMP_DIR}/was-active"
+    fi
+}
 
 # --- 日志函数 ---
 info() { echo -e "${C_BLUE}[信息]${C_RESET} $1" >&2; }
@@ -96,11 +156,12 @@ check_port_available() {
     local port="$1"
     
     if command -v ss >/dev/null 2>&1; then
-        if ss -tuln | grep -q ":${port} "; then
+        if ss -H -ltn "sport = :$port" 2>/dev/null | grep -q . || \
+           ss -H -lun "sport = :$port" 2>/dev/null | grep -q .; then
             error "端口 ${port} 已被占用，请选择其他端口。"
         fi
     elif command -v netstat >/dev/null 2>&1; then
-        if netstat -tuln | grep -q ":${port} "; then
+        if netstat -tuln 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" || $4 ~ p" " {found=1} END {exit !found}'; then
             error "端口 ${port} 已被占用，请选择其他端口。"
         fi
     fi
@@ -141,10 +202,17 @@ get_public_ip() {
     # 优先尝试获取 IPv4
     for service in "${ipv4_services[@]}"; do
         if ip=$(safe_curl "$service" | tr -d '[:space:]'); then
-            if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-                echo "$ip"
-                success "成功获取公网 IPv4 地址。"
-                return 0
+            if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+                local valid=true octet
+                IFS=. read -ra octets <<< "$ip"
+                for octet in "${octets[@]}"; do
+                    [[ "$octet" -le 255 ]] || valid=false
+                done
+                if [[ "$valid" == true ]]; then
+                    echo "$ip"
+                    success "成功获取公网 IPv4 地址。"
+                    return 0
+                fi
             fi
         fi
     done
@@ -154,7 +222,7 @@ get_public_ip() {
     # 尝试获取 IPv6
     for service in "${ipv6_services[@]}"; do
         if ip=$(safe_curl "$service" | tr -d '[:space:]'); then
-            if [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]]; then
+            if [[ "$ip" =~ ^[0-9a-fA-F:]+$ && "$ip" == *:* ]]; then
                 echo "[$ip]"
                 success "成功获取公网 IPv6 地址。"
                 return 0
@@ -289,11 +357,12 @@ download_and_install() {
     if [[ ! -f "$download_path" || ! -s "$download_path" ]]; then
         error "下载的文件无效或为空。"
     fi
-    if [[ ! -f "$checksum_path" || ! -s "$checksum_path" ]] || \
-       ! grep -Eq '^[[:xdigit:]]{64}[[:space:]]+' "$checksum_path"; then
+    local checksum
+    checksum=$(awk 'match($0,/^[[:xdigit:]]{64}/){print substr($0,RSTART,RLENGTH); exit}' "$checksum_path")
+    if [[ ! -f "$checksum_path" || ! -s "$checksum_path" || -z "$checksum" ]]; then
         error "下载的校验文件无效或为空。"
     fi
-    if ! sha256sum -c <(awk -v file="$download_path" '{print $1 "  " file; exit}' "$checksum_path") >/dev/null; then
+    if ! printf '%s  %s\n' "$checksum" "$download_path" | sha256sum -c - >/dev/null; then
         error "下载文件 SHA-256 校验失败。"
     fi
 
@@ -306,13 +375,18 @@ download_and_install() {
         error "解压后未找到 ssserver 可执行文件。"
     fi
 
-    # 安装二进制文件
-    install -m 755 "${TMP_DIR}/ssserver" "$BINARY_PATH"
-    
+    # 先准备临时文件，再原子替换，避免写入中断留下损坏二进制。
+    local new_binary="${BINARY_PATH}.new.$$"
+    install -m 755 "${TMP_DIR}/ssserver" "$new_binary"
+    mv -f "$new_binary" "$BINARY_PATH"
+
     # 创建安装目录和版本文件
     mkdir -p "$INSTALL_DIR"
-    echo "$version" > "$VERSION_FILE"
-    chmod 644 "$VERSION_FILE"
+    local new_version="${VERSION_FILE}.new.$$"
+    printf '%s\n' "$version" > "$new_version"
+    chmod 644 "$new_version"
+    chown root:root "$new_version"
+    mv -f "$new_version" "$VERSION_FILE"
 
     success "shadowsocks-rust v${version} 安装成功。"
 }
@@ -327,6 +401,8 @@ write_config() {
     mkdir -p "$INSTALL_DIR"
     
     # 生成配置文件
+    local tmp_config="${CONFIG_PATH}.tmp.$$"
+
     jq -n \
         --argjson server_port "$port" \
         --arg password "$password" \
@@ -340,11 +416,12 @@ write_config() {
             "mode": "tcp_and_udp",
             "timeout": 300,
             "no_delay": true
-        }' > "$CONFIG_PATH"
+        }' > "$tmp_config"
     
     # 设置严格的文件权限
-    chmod 600 "$CONFIG_PATH"
-    chown root:root "$CONFIG_PATH"
+    chmod 600 "$tmp_config"
+    chown root:root "$tmp_config"
+    mv -f "$tmp_config" "$CONFIG_PATH"
 }
 
 generate_config() {
@@ -446,11 +523,17 @@ manage_service() {
             if systemctl "$1" ss-rust; then
                 success "$1 命令执行成功"
                 if [[ "$1" == "start" || "$1" == "restart" ]]; then
-                    sleep "$SERVICE_START_WAIT"
+                    local attempt
+                    for ((attempt=1; attempt<=SERVICE_START_ATTEMPTS; attempt++)); do
+                        systemctl is-active --quiet ss-rust && break
+                        sleep "$SERVICE_START_WAIT"
+                    done
                     if systemctl is-active --quiet ss-rust; then
                         success "服务运行正常"
                     else
                         warn "服务启动失败，请检查配置或查看日志"
+                        journalctl -u ss-rust --no-pager -n 20 >&2 || true
+                        return 1
                     fi
                 fi
             else
@@ -510,10 +593,12 @@ do_install() {
     arch=$(detect_arch)
     latest_version=$(get_latest_version)
 
+    backup_install_state
     download_and_install "$latest_version" "$arch"
     generate_config
     create_systemd_service
-    manage_service "start"
+    manage_service "restart"
+    INSTALL_COMMITTED=true
 
     success "安装完成，shadowsocks-rust 已成功启动！"
     view_config
@@ -524,8 +609,10 @@ do_update() {
         error "shadowsocks-rust 未安装。请先执行安装。"
     fi
 
-    local current_version latest_version arch
+    local current_version latest_version arch os_type
     current_version=$(cat "$VERSION_FILE" 2>/dev/null || echo "unknown")
+    os_type=$(detect_os)
+    check_dependencies "$os_type"
     latest_version=$(get_latest_version)
 
     if [[ "$current_version" == "$latest_version" ]]; then
@@ -536,10 +623,12 @@ do_update() {
     info "发现新版本，准备从 v$current_version 更新到 v$latest_version..."
     
     arch=$(detect_arch)
+    backup_install_state
     download_and_install "$latest_version" "$arch"
     
     info "正在重启服务以应用更新..."
     manage_service "restart"
+    INSTALL_COMMITTED=true
     
     success "更新完成！"
 }
@@ -617,14 +706,30 @@ do_modify_config() {
     fi
 
     # 写入新配置
+    backup_install_state
     info "正在写入新配置..."
     write_config "$new_port" "$new_password" "$current_method"
 
     info "正在重启服务以应用新配置..."
     manage_service "restart"
+    INSTALL_COMMITTED=true
     
     success "配置修改成功！"
     view_config
+}
+
+generate_ss_url() {
+    local ip_address="$1"
+    local port="$2"
+    local password="$3"
+    local method="$4"
+    local node_name="$5"
+    local encoded_password encoded_name
+
+    encoded_password=$(printf '%s' "$password" | jq -sRr @uri)
+    encoded_name=$(printf '%s' "$node_name" | jq -sRr @uri)
+    printf 'ss://%s:%s@%s:%s#%s\n' \
+        "$method" "$encoded_password" "$ip_address" "$port" "$encoded_name"
 }
 
 view_config() {
@@ -651,9 +756,8 @@ view_config() {
     
     node_name="$(hostname)-ss2022"
 
-    local encoded_credentials
-    encoded_credentials=$(echo -n "${method}:${password}" | base64 -w 0)
-    local ss_link="ss://${encoded_credentials}@${ip_address}:${port}#${node_name}"
+    local ss_link
+    ss_link=$(generate_ss_url "$ip_address" "$port" "$password" "$method" "$node_name")
 
     {
         echo ""
@@ -828,29 +932,27 @@ EOF
             error "shadowsocks-rust 已安装。使用 --force 参数强制重新安装。"
         fi
 
-        info "步骤 1/6: 清理旧版本..."
-        if [[ "$force_install" == true ]]; then
-            run_uninstall_logic
-        fi
-
-        info "步骤 2/6: 环境检测与依赖安装..."
+        info "步骤 1/5: 环境检测与依赖安装..."
         local os_type arch latest_version
         os_type=$(detect_os)
         check_dependencies "$os_type"
         arch=$(detect_arch)
 
-        info "步骤 3/6: 下载并安装最新版本..."
+        backup_install_state
+
+        info "步骤 2/5: 下载并安装最新版本..."
         latest_version=$(get_latest_version)
         download_and_install "$latest_version" "$arch"
 
-        info "步骤 4/6: 生成配置文件..."
+        info "步骤 3/5: 生成配置文件..."
         generate_config "$ss_port" "$ss_password" "$ss_method"
 
-        info "步骤 5/6: 创建并启动服务..."
+        info "步骤 4/5: 创建并启动服务..."
         create_systemd_service
-        manage_service "start"
+        manage_service "restart"
+        INSTALL_COMMITTED=true
 
-        info "步骤 6/6: 显示最终配置..."
+        info "步骤 5/5: 显示最终配置..."
         view_config
 
         success "=== 一键安装完成 ==="
