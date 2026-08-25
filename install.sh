@@ -814,7 +814,7 @@ main_menu() {
         echo -e "  ${C_YELLOW}2.${C_RESET} 更新 Shadowsocks-rust"
         echo -e "  ${C_YELLOW}3.${C_RESET} 卸载 Shadowsocks-rust"
         echo "  ------------------------------------"
-        echo -e "  ${C_YELLOW}4.${C_RESET} 修改配置 (端口/密码)"
+        echo -e "  ${C_YELLOW}4.${C_RESET} 修改配置 (加密方式/端口/密码)"
         echo -e "  ${C_YELLOW}5.${C_RESET} 查看配置信息"
         echo "  ------------------------------------"
         echo -e "  ${C_YELLOW}6.${C_RESET} 启动服务"
