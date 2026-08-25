@@ -17,7 +17,7 @@
 直接运行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh | sudo bash -s --
+tmp=$(mktemp) && trap 'rm -f "$tmp"' EXIT && curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh -o "$tmp" && sudo bash "$tmp"
 ```
 
 脚本需要 root 权限，首次运行后选择菜单中的 `1` 安装。运行前需要系统已安装 `curl`。
@@ -27,13 +27,13 @@ curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh | 
 使用 `2022-blake3-aes-128-gcm`，密钥 Base64 编码 16 字节。
 
 ```bash
-PASSWORD="$(openssl rand -base64 16)" && curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh | sudo bash -s -- --port 8388 --password "$PASSWORD" --method 2022-blake3-aes-128-gcm
+PASSWORD="$(openssl rand -base64 16)" && tmp=$(mktemp) && trap 'rm -f "$tmp"' EXIT && curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh -o "$tmp" && sudo bash "$tmp" --port 8388 --password "$PASSWORD" --method 2022-blake3-aes-128-gcm
 ```
 
 使用 `2022-blake3-chacha20-poly1305`，密钥 Base64 编码 32 字节。
 
 ```bash
-PASSWORD="$(openssl rand -base64 32)" && curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh | sudo bash -s -- --port 8388 --password "$PASSWORD" --method 2022-blake3-chacha20-poly1305
+PASSWORD="$(openssl rand -base64 32)" && tmp=$(mktemp) && trap 'rm -f "$tmp"' EXIT && curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh -o "$tmp" && sudo bash "$tmp" --port 8388 --password "$PASSWORD" --method 2022-blake3-chacha20-poly1305
 ```
 
 参数：
@@ -51,7 +51,7 @@ PASSWORD="$(openssl rand -base64 32)" && curl -fsSL https://raw.githubuserconten
 不带参数重新运行上面的一键命令即可进入管理菜单：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh | sudo bash -s --
+tmp=$(mktemp) && trap 'rm -f "$tmp"' EXIT && curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh -o "$tmp" && sudo bash "$tmp"
 ```
 
 服务管理：
