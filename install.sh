@@ -75,7 +75,7 @@ safe_curl() {
                 --tlsv1.2 "$url" 2>/dev/null; then
             return 0
         fi
-        ((retry++))
+        retry=$((retry + 1))
         if [[ $retry -lt $MAX_RETRIES ]]; then
             sleep $retry
         fi
@@ -258,6 +258,7 @@ download_and_install() {
     local arch="$2"
     local download_url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/v${version}/shadowsocks-v${version}.${arch}.tar.xz"
     local download_path="${TMP_DIR}/ss-rust.tar.xz"
+    local checksum_path="${TMP_DIR}/ss-rust.tar.xz.sha256"
 
     info "正在下载 shadowsocks-rust v${version}..."
     
@@ -267,9 +268,23 @@ download_and_install() {
         error "下载失败，请检查网络连接或稍后重试。"
     fi
 
+    info "正在下载校验文件..."
+    if ! wget --timeout="$NETWORK_TIMEOUT" --tries="$MAX_RETRIES" \
+             --user-agent="ss-rust-manager/$SCRIPT_VERSION" \
+             -qO "$checksum_path" "${download_url}.sha256"; then
+        error "下载校验文件失败，已停止安装。"
+    fi
+
     info "正在验证下载文件..."
     if [[ ! -f "$download_path" || ! -s "$download_path" ]]; then
         error "下载的文件无效或为空。"
+    fi
+    if [[ ! -f "$checksum_path" || ! -s "$checksum_path" ]] || \
+       ! grep -Eq '^[[:xdigit:]]{64}[[:space:]]+' "$checksum_path"; then
+        error "下载的校验文件无效或为空。"
+    fi
+    if ! sha256sum -c <(awk -v file="$download_path" '{print $1 "  " file; exit}' "$checksum_path") >/dev/null; then
+        error "下载文件 SHA-256 校验失败。"
     fi
 
     info "正在解压并安装..."
