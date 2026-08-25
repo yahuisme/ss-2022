@@ -24,13 +24,13 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/i
 
 ## 无交互安装
 
-默认使用 `2022-blake3-aes-128-gcm`，也支持 `2022-blake3-chacha20-poly1305`。密钥必须是对应长度的 Base64 编码：AES-128 为 16 字节，ChaCha20 为 32 字节。
+使用 `2022-blake3-aes-128-gcm`，密钥 Base64 编码 16 字节。
 
 ```bash
 PASSWORD="$(openssl rand -base64 16)" && sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-aes-128-gcm
 ```
 
-使用 ChaCha20：
+使用 `2022-blake3-chacha20-poly1305`，密钥 Base64 编码 32 字节。
 
 ```bash
 PASSWORD="$(openssl rand -base64 32)" && sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-chacha20-poly1305
