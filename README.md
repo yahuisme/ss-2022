@@ -19,7 +19,7 @@
 sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh)
 ```
 
-脚本需要 root 权限，首次运行后选择菜单中的 `1` 安装。
+脚本需要 root 权限，首次运行后选择菜单中的 `1` 安装。运行前需要系统已安装 `curl`。
 
 ## 无交互安装
 
@@ -40,10 +40,10 @@ PASSWORD="$(openssl rand -base64 16)" && sudo bash <(curl -fsSL https://raw.gith
 
 ## 管理
 
-不带参数运行脚本即可进入菜单：
+不带参数重新运行上面的一键命令即可进入管理菜单：
 
 ```bash
-sudo bash install.sh
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh)
 ```
 
 服务管理：
