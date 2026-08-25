@@ -13,22 +13,10 @@
 
 ## 安装
 
-推荐先下载并检查脚本：
+直接运行：
 
 ```bash
-curl -fL --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh \
-  -o install.sh
-
-less install.sh
-sudo bash install.sh
-```
-
-也可以直接运行：
-
-```bash
-sudo bash <(curl -fL --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh)
 ```
 
 脚本需要 root 权限，首次运行后选择菜单中的 `1` 安装。
@@ -38,9 +26,7 @@ sudo bash <(curl -fL --proto '=https' --tlsv1.2 \
 默认使用 `2022-blake3-aes-128-gcm`，密码必须是 **16 字节密钥的 Base64 编码**：
 
 ```bash
-PASSWORD="$(openssl rand -base64 16)" && sudo bash <(curl -fL --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) \
-  --port 8388 --password "$PASSWORD"
+PASSWORD="$(openssl rand -base64 16)" && sudo bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD"
 ```
 
 参数：
