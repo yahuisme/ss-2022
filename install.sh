@@ -419,7 +419,7 @@ generate_config() {
     if [[ -z "${3:-}" && -z "$port" ]]; then
         read -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (默认: 1): " method_choice < /dev/tty
         [[ "$method_choice" == "2" ]] && method="2022-blake3-chacha20-poly1305"
-        [[ -z "$method_choice" || "$method_choice" == "1" ]] || error "无效的加密方式选项"
+        [[ -z "$method_choice" || "$method_choice" == "1" || "$method_choice" == "2" ]] || error "无效的加密方式选项"
     fi
     key_bytes=$(get_key_bytes "$method")
 
