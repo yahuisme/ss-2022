@@ -208,27 +208,6 @@ validate_config_values() {
     validate_password "$password" "$key_bytes"
 }
 
-validate_server_address() {
-    local address="$1" octet
-    [[ -n "$address" && "$address" != *[[:space:][:cntrl:]@#]* ]] || \
-        error "服务器地址包含非法字符。"
-    if [[ "$address" == \[*\] ]]; then
-        address="${address#\[}"
-        address="${address%\]}"
-    fi
-    if [[ "$address" == *:* ]]; then
-        [[ "$address" =~ ^[0-9A-Fa-f:]+$ ]] || error "IPv6 服务器地址格式无效。"
-    elif [[ "$address" =~ ^[0-9.]+$ ]]; then
-        IFS=. read -ra octets <<< "$address"
-        [[ ${#octets[@]} -eq 4 ]] || error "IPv4 服务器地址格式无效。"
-        for octet in "${octets[@]}"; do
-            [[ "$octet" =~ ^[0-9]{1,3}$ && "$octet" -le 255 ]] || error "IPv4 服务器地址格式无效。"
-        done
-    else
-        [[ "$address" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || error "服务器域名格式无效。"
-    fi
-}
-
 get_public_ip() {
     info "正在查询公网IP地址..."
     local ip=""
@@ -818,7 +797,6 @@ generate_ss_url() {
 
 view_config() {
     local ip_address="${1:-}"
-    local non_interactive_mode="${2:-false}"
     local port password method node_name ss_link
     load_config
     port="$current_port"
@@ -826,12 +804,7 @@ view_config() {
     method="$current_method"
     node_name="$(hostname)-ss2022"
 
-    if [[ -z "$ip_address" ]] && ! ip_address=$(get_public_ip); then
-        if [[ "$non_interactive_mode" != true ]]; then
-            read -r -p "请输入服务器地址以生成 SS 链接（回车跳过）: " ip_address < /dev/tty || ip_address=""
-        fi
-        [[ -z "$ip_address" ]] || validate_server_address "$ip_address"
-    fi
+    [[ -n "$ip_address" ]] || ip_address=$(get_public_ip) || ip_address=""
     if [[ -n "$ip_address" && "$ip_address" == *:* && "$ip_address" != \[*\] ]]; then
         ip_address="[$ip_address]"
     fi
@@ -934,7 +907,6 @@ main() {
     local ss_port=""
     local ss_password=""
     local ss_method="$DEFAULT_ENCRYPTION_METHOD"
-    local ss_server=""
     local force_install=false
 
     # 参数解析
@@ -962,14 +934,6 @@ main() {
                 ss_method="$2"
                 shift 2
                 ;;
-            -s|--server)
-                if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
-                    error "参数 $1 需要指定服务器地址"
-                fi
-                validate_server_address "$2"
-                ss_server="$2"
-                shift 2
-                ;;
             -f|--force)
                 force_install=true
                 shift
@@ -985,7 +949,6 @@ Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
   -p, --port <端口>     指定端口 (1-65535)
   -w, --password <密码> 指定 Base64 编码的密钥
   -m, --method <方式>   2022-blake3-aes-128-gcm 或 2022-blake3-chacha20-poly1305
-  -s, --server <地址>   指定服务器地址，用于生成 SS 链接
   -f, --force           强制重新安装 (覆盖现有安装)
   -h, --help            显示此帮助信息
 
@@ -1032,7 +995,7 @@ EOF
         install_flow true "$ss_port" "$ss_password" "$ss_method"
 
         info "显示最终配置..."
-        view_config "$ss_server" true
+        view_config
         exit 0
         
     elif [[ -n "$ss_port" || -n "$ss_password" ]]; then
