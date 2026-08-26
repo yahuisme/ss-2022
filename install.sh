@@ -420,8 +420,7 @@ download_and_install() {
     install -m 755 "${TMP_DIR}/ssserver" "$new_binary"
     mv -f "$new_binary" "$BINARY_PATH"
 
-    # 创建安装目录和版本文件
-    mkdir -p "$INSTALL_DIR"
+    # 创建版本文件
     local new_version
     new_version=$(mktemp "${VERSION_FILE}.new.XXXXXX")
     printf '%s\n' "$version" > "$new_version"
@@ -511,11 +510,9 @@ generate_config() {
             success "已生成随机密码。"
         else
             password=$password_input
-            validate_password "$password" "$key_bytes"
         fi
     else
         info "使用指定的密码。"
-        validate_password "$password" "$key_bytes"
     fi
     
     validate_config_values "$port" "$password" "$method"
@@ -781,8 +778,9 @@ do_modify_config() {
         success "新密码: ${new_password}"
     else
         new_password=$new_password_input
-        validate_password "$new_password" "$key_bytes"
     fi
+
+    validate_config_values "$new_port" "$new_password" "$new_method"
 
     # 检查是否有变化
     if [[ "$new_port" == "$current_port" && "$new_password" == "$current_password" && "$new_method" == "$current_method" ]]; then
