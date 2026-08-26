@@ -6,7 +6,8 @@
 
 - Debian、Ubuntu、CentOS（需要 systemd）
 - x86_64、aarch64、armv7l
-- AES-128-GCM、ChaCha20-Poly1305
+- `2022-blake3-aes-128-gcm`
+- `2022-blake3-chacha20-poly1305`
 
 ## 安装
 
@@ -21,7 +22,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/instal
 ## 无交互安装
 
 ```bash
-PASSWORD="$(openssl rand -base64 16)" && bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD"
+PASSWORD="$(openssl rand -base64 16)" && bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-aes-128-gcm
 ```
 
 使用 ChaCha20：
@@ -51,7 +52,8 @@ journalctl -u ss-rust -n 50 --no-pager
 ## 注意
 
 - 请在防火墙和云安全组放行实际使用的 TCP/UDP 端口。
-- `--password` 为 Base64 密钥：AES-128-GCM 使用 16 字节，ChaCha20 使用 32 字节。
+- `--method` 可选，默认是 `2022-blake3-aes-128-gcm`。
+- `--password` 为 Base64 密钥：`2022-blake3-aes-128-gcm` 使用 16 字节，`2022-blake3-chacha20-poly1305` 使用 32 字节。
 - `--password` 传参可能出现在进程信息中。
 - 下载文件会进行 SHA-256 校验。
 - 已安装时不能重复安装，如需重装请先卸载。
