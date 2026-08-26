@@ -11,6 +11,7 @@
 - 自动创建 systemd 服务
 - 自动校验下载文件的 SHA-256
 - 支持安装、更新、卸载、配置和服务管理
+- 支持自动检测或手动指定服务器地址并生成 SS 链接
 
 ## 安装
 
@@ -38,15 +39,29 @@ PASSWORD="$(openssl rand -base64 16)" && bash <(curl -fsSL https://raw.githubuse
 PASSWORD="$(openssl rand -base64 32)" && bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-chacha20-poly1305
 ```
 
+使用手动服务器地址生成链接：
+
+```bash
+PASSWORD="$(openssl rand -base64 16)" && bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-aes-128-gcm --server 203.0.113.10
+```
+
 参数：
 
 ```text
 -p, --port <端口>       端口，范围 1-65535
 -w, --password <密码>   指定 Base64 编码的密钥
 -m, --method <方式>     2022-blake3-aes-128-gcm 或 2022-blake3-chacha20-poly1305
+-s, --server <地址>     指定服务器地址，用于生成 SS 链接
 -f, --force             强制重新安装
 -h, --help              显示帮助
 ```
+
+## 精简与优化
+
+- 统一使用 `curl` 下载和请求，移除对 `wget` 的依赖。
+- 使用 `mktemp` 创建临时文件，并通过原子替换更新二进制、版本和配置。
+- 安装、更新、修改配置和查看配置统一校验端口、加密方式及 Base64 密钥长度。
+- systemd 服务启用基础隔离和权限加固选项。
 
 ## 管理
 
@@ -72,10 +87,11 @@ sudo journalctl -u ss-rust -n 50 --no-pager
 - 脚本从 shadowsocks-rust GitHub Release 获取最新稳定版。
 - 下载文件会进行 SHA-256 校验，校验失败不会继续安装。
 - 请在防火墙和云平台安全组中放行实际使用的 TCP/UDP 端口。
-- 生成的 `ss://` 链接使用 Shadowsocks 2022 的标准 SIP002 格式。
+- 生成的 `ss://` 链接使用 Shadowsocks 2022 的标准 SIP002 格式，`method:password` 整体进行 Base64URL 编码。
+- `--server` 可手动指定服务器地址，支持 IPv4、IPv6 或域名；IPv6 可使用 `2001:db8::1`，脚本会自动补充方括号。
 - 使用 `--password` 传参时，密码可能短暂出现在进程参数中；固定密钥的无交互安装方式仍然可用。
 - Shadowsocks 2022 密钥是随机原始密钥的 Base64 表示：AES-128-GCM 为 16 字节，ChaCha20-Poly1305 为 32 字节。
-- 使用 `--force` 重新安装时不会在下载前删除原安装；一键模式会按命令行提供的端口、密钥和加密方式写入配置，失败会尝试恢复原安装。
+- `--force` 重新安装时会在写入新配置前暂时停止旧服务，以避免旧服务占用原端口；失败会尝试恢复原安装。
 - 卸载会删除服务、二进制文件和 `/etc/ss-rust/` 配置目录。
 
 本项目暂未单独声明许可证。使用和分发前请遵守作者及上游项目的相关许可条款。

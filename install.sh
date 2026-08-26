@@ -115,7 +115,7 @@ error() { echo -e "${C_RED}[错误]${C_RESET} $1" >&2; exit 1; }
 safe_curl() {
     local url="$1"
     local retry=0
-    
+
     while [[ $retry -lt $MAX_RETRIES ]]; do
         if curl -s --fail --max-time "$NETWORK_TIMEOUT" \
                 --user-agent "ss-rust-manager/$SCRIPT_VERSION" \
@@ -124,10 +124,18 @@ safe_curl() {
         fi
         retry=$((retry + 1))
         if [[ $retry -lt $MAX_RETRIES ]]; then
-            sleep $retry
+            sleep "$retry"
         fi
     done
     return 1
+}
+
+decode_base64() {
+    if base64 --help 2>&1 | grep -q -- '--strict'; then
+        base64 --decode --strict
+    else
+        base64 --decode
+    fi
 }
 
 # --- 基础检查函数 ---
@@ -158,17 +166,28 @@ validate_password() {
     local password="$1"
     local key_bytes="$2"
     
-    # 检查是否为有效的 Base64
-    if ! echo "$password" | base64 -d >/dev/null 2>&1; then
+    # 检查是否为严格有效的 Base64
+    if [[ ! "$password" =~ ^[A-Za-z0-9+/]+={0,2}$ || $((${#password} % 4)) -ne 0 ]]; then
         error "密码必须是有效的 Base64 编码字符串。"
     fi
-    
+    local decoded_file canonical_password
+    decoded_file=$(mktemp "${TMP_DIR}/decoded-key.XXXXXX")
+    if ! printf '%s' "$password" | decode_base64 >"$decoded_file" 2>/dev/null; then
+        rm -f "$decoded_file"
+        error "密码必须是有效的 Base64 编码字符串。"
+    fi
+
     # 检查解码后的长度
     local decoded_len
-    decoded_len=$(echo "$password" | base64 -d 2>/dev/null | wc -c)
+    decoded_len=$(wc -c <"$decoded_file")
     if [[ "$decoded_len" -ne "$key_bytes" ]]; then
+        rm -f "$decoded_file"
         error "密码解码后的长度必须为 ${key_bytes} 字节，当前为 ${decoded_len} 字节。"
     fi
+    canonical_password=$(base64 <"$decoded_file" | tr -d '\n')
+    rm -f "$decoded_file"
+    [[ "$password" == "$canonical_password" ]] || \
+        error "密码必须使用规范的 Base64 编码格式。"
 }
 
 get_key_bytes() {
@@ -177,6 +196,37 @@ get_key_bytes() {
         2022-blake3-chacha20-poly1305) echo "$CHACHA_KEY_BYTES" ;;
         *) error "不支持的加密方式: $1" ;;
     esac
+}
+
+validate_config_values() {
+    local port="$1" password="$2" method="$3" key_bytes
+
+    if [[ ! "$port" =~ ^[0-9]+$ || "$port" -lt $MIN_PORT || "$port" -gt $MAX_PORT ]]; then
+        error "配置中的端口无效，必须在 ${MIN_PORT}-${MAX_PORT} 范围内。"
+    fi
+    key_bytes=$(get_key_bytes "$method")
+    validate_password "$password" "$key_bytes"
+}
+
+validate_server_address() {
+    local address="$1" octet
+    [[ -n "$address" && "$address" != *[[:space:][:cntrl:]@#]* ]] || \
+        error "服务器地址包含非法字符。"
+    if [[ "$address" == \[*\] ]]; then
+        address="${address#\[}"
+        address="${address%\]}"
+    fi
+    if [[ "$address" == *:* ]]; then
+        [[ "$address" =~ ^[0-9A-Fa-f:]+$ ]] || error "IPv6 服务器地址格式无效。"
+    elif [[ "$address" =~ ^[0-9.]+$ ]]; then
+        IFS=. read -ra octets <<< "$address"
+        [[ ${#octets[@]} -eq 4 ]] || error "IPv4 服务器地址格式无效。"
+        for octet in "${octets[@]}"; do
+            [[ "$octet" =~ ^[0-9]{1,3}$ && "$octet" -le 255 ]] || error "IPv4 服务器地址格式无效。"
+        done
+    else
+        [[ "$address" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || error "服务器域名格式无效。"
+    fi
 }
 
 get_public_ip() {
@@ -244,7 +294,7 @@ detect_arch() {
 check_dependencies() {
     info "正在检查必要的依赖工具..."
     local os_type="$1"
-    local dependencies=("curl" "jq" "wget" "tar" "xz" "openssl")
+    local dependencies=("curl" "jq" "tar" "xz" "openssl")
     local missing_deps=()
 
     for dep in "${dependencies[@]}"; do
@@ -326,16 +376,18 @@ download_and_install() {
 
     info "正在下载 shadowsocks-rust v${version}..."
     
-    if ! wget --timeout="$NETWORK_TIMEOUT" --tries="$MAX_RETRIES" \
-             --user-agent="ss-rust-manager/$SCRIPT_VERSION" \
-             -qO "$download_path" "$download_url"; then
+    if ! curl -fsSL --retry "$MAX_RETRIES" --connect-timeout "$NETWORK_TIMEOUT" \
+             --max-time "$NETWORK_TIMEOUT" --tlsv1.2 \
+             --user-agent "ss-rust-manager/$SCRIPT_VERSION" \
+             -o "$download_path" "$download_url"; then
         error "下载失败，请检查网络连接或稍后重试。"
     fi
 
     info "正在下载校验文件..."
-    if ! wget --timeout="$NETWORK_TIMEOUT" --tries="$MAX_RETRIES" \
-             --user-agent="ss-rust-manager/$SCRIPT_VERSION" \
-             -qO "$checksum_path" "${download_url}.sha256"; then
+    if ! curl -fsSL --retry "$MAX_RETRIES" --connect-timeout "$NETWORK_TIMEOUT" \
+             --max-time "$NETWORK_TIMEOUT" --tlsv1.2 \
+             --user-agent "ss-rust-manager/$SCRIPT_VERSION" \
+             -o "$checksum_path" "${download_url}.sha256"; then
         error "下载校验文件失败，已停止安装。"
     fi
 
@@ -362,13 +414,16 @@ download_and_install() {
     fi
 
     # 先准备临时文件，再原子替换，避免写入中断留下损坏二进制。
-    local new_binary="${BINARY_PATH}.new.$$"
+    mkdir -p "$INSTALL_DIR"
+    local new_binary
+    new_binary=$(mktemp "${BINARY_PATH}.new.XXXXXX")
     install -m 755 "${TMP_DIR}/ssserver" "$new_binary"
     mv -f "$new_binary" "$BINARY_PATH"
 
     # 创建安装目录和版本文件
     mkdir -p "$INSTALL_DIR"
-    local new_version="${VERSION_FILE}.new.$$"
+    local new_version
+    new_version=$(mktemp "${VERSION_FILE}.new.XXXXXX")
     printf '%s\n' "$version" > "$new_version"
     chmod 644 "$new_version"
     chown root:root "$new_version"
@@ -387,7 +442,8 @@ write_config() {
     mkdir -p "$INSTALL_DIR"
     
     # 生成配置文件
-    local tmp_config="${CONFIG_PATH}.tmp.$$"
+    local tmp_config
+    tmp_config=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
 
     jq -n \
         --argjson server_port "$port" \
@@ -462,6 +518,8 @@ generate_config() {
         validate_password "$password" "$key_bytes"
     fi
     
+    validate_config_values "$port" "$password" "$method"
+
     # 写入新配置
     write_config "$port" "$password" "$method"
     success "配置文件已创建于 $CONFIG_PATH"
@@ -484,6 +542,10 @@ ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target
@@ -574,6 +636,10 @@ install_flow() {
     download_and_install "$version" "$arch"
 
     if [[ "$configure" == true ]]; then
+        if [[ -f "$SYSTEMD_SERVICE_FILE" ]] && systemctl is-active --quiet ss-rust 2>/dev/null; then
+            info "正在暂时停止旧服务，以释放原配置端口..."
+            systemctl stop ss-rust || error "无法停止旧服务，已中止操作。"
+        fi
         if [[ -n "$port" || -n "$password" ]]; then
             generate_config "$port" "$password" "$method"
         else
@@ -609,9 +675,13 @@ do_update() {
     fi
 
     local current_version latest_version os_type
-    current_version=$(cat "$VERSION_FILE" 2>/dev/null || echo "unknown")
     os_type=$(detect_os)
     check_dependencies "$os_type"
+    [[ -s "$VERSION_FILE" ]] || error "版本文件缺失或为空，无法执行更新。"
+    current_version=$(<"$VERSION_FILE")
+    [[ "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || \
+        error "版本文件格式无效，无法执行更新。"
+    load_config
     latest_version=$(get_latest_version)
 
     if [[ "$current_version" == "$latest_version" ]]; then
@@ -642,12 +712,12 @@ do_uninstall() {
 
 load_config() {
     [[ -f "$CONFIG_PATH" ]] || error "找不到配置文件，请先执行安装。"
-    if ! config_values=$(jq -er '[.server_port, .password, .method] | @tsv' "$CONFIG_PATH" 2>/dev/null); then
+    config_values=$(jq -er 'select((.server_port|type)=="number" and (.server_port|floor)==.server_port and (.password|type)=="string" and (.method|type)=="string") | [.server_port, .password, .method] | @tsv' "$CONFIG_PATH" 2>/dev/null) || \
         error "配置文件格式错误，无法读取必要信息。"
-    fi
     IFS=$'\t' read -r current_port current_password current_method <<< "$config_values"
     [[ -n "$current_port" && -n "$current_password" && -n "$current_method" ]] || \
         error "配置文件格式错误，无法读取必要信息。"
+    validate_config_values "$current_port" "$current_password" "$current_method"
 }
 
 do_modify_config() {
@@ -739,16 +809,18 @@ generate_ss_url() {
     local password="$3"
     local method="$4"
     local node_name="$5"
-    local encoded_password encoded_name
+    local encoded_userinfo encoded_name
 
-    encoded_password=$(printf '%s' "$password" | jq -sRr @uri)
+    encoded_userinfo=$(printf '%s:%s' "$method" "$password" |
+        base64 | tr '+/' '-_' | tr -d '=\n')
     encoded_name=$(printf '%s' "$node_name" | jq -sRr @uri)
-    printf 'ss://%s:%s@%s:%s#%s\n' \
-        "$method" "$encoded_password" "$ip_address" "$port" "$encoded_name"
+    printf 'ss://%s@%s:%s#%s\n' \
+        "$encoded_userinfo" "$ip_address" "$port" "$encoded_name"
 }
 
 view_config() {
-    local ip_address=""
+    local ip_address="${1:-}"
+    local non_interactive_mode="${2:-false}"
     local port password method node_name ss_link
     load_config
     port="$current_port"
@@ -756,8 +828,14 @@ view_config() {
     method="$current_method"
     node_name="$(hostname)-ss2022"
 
-    if ! ip_address=$(get_public_ip); then
-        warn "无法获取公网 IP，将只显示本地配置。"
+    if [[ -z "$ip_address" ]] && ! ip_address=$(get_public_ip); then
+        if [[ "$non_interactive_mode" != true ]]; then
+            read -r -p "请输入服务器地址以生成 SS 链接（回车跳过）: " ip_address < /dev/tty || ip_address=""
+        fi
+        [[ -z "$ip_address" ]] || validate_server_address "$ip_address"
+    fi
+    if [[ -n "$ip_address" && "$ip_address" == *:* && "$ip_address" != \[*\] ]]; then
+        ip_address="[$ip_address]"
     fi
 
     {
@@ -858,13 +936,14 @@ main() {
     local ss_port=""
     local ss_password=""
     local ss_method="$DEFAULT_ENCRYPTION_METHOD"
+    local ss_server=""
     local force_install=false
 
     # 参数解析
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--port)
-                if [[ -z "$2" || "$2" =~ ^- ]]; then
+                if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
                     error "参数 $1 需要指定端口号"
                 fi
                 ss_port="$2"
@@ -885,6 +964,14 @@ main() {
                 ss_method="$2"
                 shift 2
                 ;;
+            -s|--server)
+                if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
+                    error "参数 $1 需要指定服务器地址"
+                fi
+                validate_server_address "$2"
+                ss_server="$2"
+                shift 2
+                ;;
             -f|--force)
                 force_install=true
                 shift
@@ -900,6 +987,7 @@ Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
   -p, --port <端口>     指定端口 (1-65535)
   -w, --password <密码> 指定 Base64 编码的密钥
   -m, --method <方式>   2022-blake3-aes-128-gcm 或 2022-blake3-chacha20-poly1305
+  -s, --server <地址>   指定服务器地址，用于生成 SS 链接
   -f, --force           强制重新安装 (覆盖现有安装)
   -h, --help            显示此帮助信息
 
@@ -946,9 +1034,7 @@ EOF
         install_flow true "$ss_port" "$ss_password" "$ss_method"
 
         info "显示最终配置..."
-        view_config
-
-        success "=== 一键安装完成 ==="
+        view_config "$ss_server" true
         exit 0
         
     elif [[ -n "$ss_port" || -n "$ss_password" ]]; then
