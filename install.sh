@@ -24,6 +24,7 @@ readonly MAX_PORT=65535
 
 # --- 网络配置常量 ---
 readonly NETWORK_TIMEOUT=10
+readonly DOWNLOAD_TIMEOUT=60
 readonly MAX_RETRIES=3
 readonly SERVICE_START_WAIT=1
 readonly SERVICE_START_ATTEMPTS=5
@@ -128,6 +129,18 @@ safe_curl() {
         fi
     done
     return 1
+}
+
+download_file() {
+    local output="$1"
+    local url="$2"
+
+    curl -fsSL --retry "$MAX_RETRIES" \
+        --connect-timeout "$NETWORK_TIMEOUT" \
+        --max-time "$DOWNLOAD_TIMEOUT" \
+        --tlsv1.2 \
+        --user-agent "ss-rust-manager/$SCRIPT_VERSION" \
+        -o "$output" "$url"
 }
 
 decode_base64() {
@@ -343,6 +356,8 @@ get_latest_version() {
     fi
     
     latest_version="${latest_version#v}"
+    [[ "$latest_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || \
+        error "获取到的版本号格式无效。"
     echo "$latest_version"
 }
 
@@ -355,18 +370,12 @@ download_and_install() {
 
     info "正在下载 shadowsocks-rust v${version}..."
     
-    if ! curl -fsSL --retry "$MAX_RETRIES" --connect-timeout "$NETWORK_TIMEOUT" \
-             --max-time "$NETWORK_TIMEOUT" --tlsv1.2 \
-             --user-agent "ss-rust-manager/$SCRIPT_VERSION" \
-             -o "$download_path" "$download_url"; then
+    if ! download_file "$download_path" "$download_url"; then
         error "下载失败，请检查网络连接或稍后重试。"
     fi
 
     info "正在下载校验文件..."
-    if ! curl -fsSL --retry "$MAX_RETRIES" --connect-timeout "$NETWORK_TIMEOUT" \
-             --max-time "$NETWORK_TIMEOUT" --tlsv1.2 \
-             --user-agent "ss-rust-manager/$SCRIPT_VERSION" \
-             -o "$checksum_path" "${download_url}.sha256"; then
+    if ! download_file "$checksum_path" "${download_url}.sha256"; then
         error "下载校验文件失败，已停止安装。"
     fi
 
@@ -608,14 +617,14 @@ install_flow() {
     check_dependencies "$os_type"
     arch=$(detect_arch)
     backup_install_state
+    if [[ -f "$SYSTEMD_SERVICE_FILE" ]] && systemctl is-active --quiet ss-rust 2>/dev/null; then
+        info "正在暂时停止旧服务，以安全替换程序..."
+        systemctl stop ss-rust || error "无法停止旧服务，已中止操作。"
+    fi
     version=${version:-$(get_latest_version)}
     download_and_install "$version" "$arch"
 
     if [[ "$configure" == true ]]; then
-        if [[ -f "$SYSTEMD_SERVICE_FILE" ]] && systemctl is-active --quiet ss-rust 2>/dev/null; then
-            info "正在暂时停止旧服务，以释放原配置端口..."
-            systemctl stop ss-rust || error "无法停止旧服务，已中止操作。"
-        fi
         if [[ -n "$port" || -n "$password" ]]; then
             generate_config "$port" "$password" "$method"
         else
@@ -920,7 +929,7 @@ main() {
                 shift 2
                 ;;
             -w|--password)
-                if [[ -z "$2" || "$2" =~ ^- ]]; then
+                if [[ -z "${2:-}" || "${2:-}" =~ ^- ]]; then
                     error "参数 $1 需要指定密码"
                 fi
                 ss_password="$2"

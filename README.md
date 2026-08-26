@@ -23,6 +23,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/instal
 
 脚本需要 root 权限，首次运行后选择菜单中的 `1` 安装。运行前需要系统已安装 `curl`。
 
+脚本适用于使用 `systemd` 的 Debian、Ubuntu 和 CentOS，并支持 `x86_64`、`aarch64`、`armv7l`。不适用于 Alpine、OpenWrt 或不带 systemd 的容器环境。缺少 `jq`、`tar`、`xz` 或 `openssl` 时，脚本会在安装/更新过程中提示并尝试通过系统包管理器安装。
+
 如果当前终端已经是 root（提示符通常以 `root@` 开头），直接使用上面的 `bash <(curl ...)` 命令即可。如果当前用户不是 root，请先执行 `sudo -i` 切换到 root shell，再运行该命令。不要写成 `sudo bash <(curl ...)`：进程替换生成的 `/dev/fd/*` 由当前 Shell 创建，`sudo` 可能无法访问，导致 `/dev/fd/*: No such file or directory`。
 
 ## 无交互安装
@@ -77,6 +79,8 @@ sudo journalctl -u ss-rust -n 50 --no-pager
 - 使用 `--password` 传参时，密码可能短暂出现在进程参数中；固定密钥的无交互安装方式仍然可用。
 - Shadowsocks 2022 密钥是随机原始密钥的 Base64 表示：AES-128-GCM 为 16 字节，ChaCha20-Poly1305 为 32 字节。
 - `--force` 重新安装时会在写入新配置前暂时停止旧服务，以避免旧服务占用原端口；失败会尝试恢复原安装。
+- 更新或强制重新安装失败时，会尝试恢复原二进制、配置、服务文件及服务运行状态。
+- `--port` 和 `--password` 必须同时提供；`--force` 仅允许覆盖已有安装，不会自动修改现有配置。
 - 卸载会删除服务、二进制文件和 `/etc/ss-rust/` 配置目录。
 
 本项目暂未单独声明许可证。使用和分发前请遵守作者及上游项目的相关许可条款。
