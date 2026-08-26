@@ -537,8 +537,12 @@ WantedBy=multi-user.target
 EOF
 
     chmod 644 "$SYSTEMD_SERVICE_FILE"
-    systemctl daemon-reload
-    systemctl enable ss-rust
+    if ! systemctl daemon-reload; then
+        error "systemd daemon-reload 失败。"
+    fi
+    if ! systemctl enable ss-rust; then
+        error "ss-rust 服务设置开机自启失败。"
+    fi
     success "Systemd 服务已创建并设为开机自启。"
 }
 
@@ -916,7 +920,6 @@ main() {
     local ss_port=""
     local ss_password=""
     local ss_method="$DEFAULT_ENCRYPTION_METHOD"
-    local force_install=false
 
     # 参数解析
     while [[ $# -gt 0 ]]; do
@@ -943,10 +946,6 @@ main() {
                 ss_method="$2"
                 shift 2
                 ;;
-            -f|--force)
-                force_install=true
-                shift
-                ;;
             -h|--help)
                 cat << EOF
 Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
@@ -958,7 +957,6 @@ Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
   -p, --port <端口>     指定端口 (1-65535)
   -w, --password <密码> 指定 Base64 编码的密钥
   -m, --method <方式>   2022-blake3-aes-128-gcm 或 2022-blake3-chacha20-poly1305
-  -f, --force           强制重新安装 (覆盖现有安装)
   -h, --help            显示此帮助信息
 
 示例:
@@ -970,10 +968,6 @@ Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
 
   # 使用 ChaCha20-Poly1305
   $0 --port 8388 --password \$(openssl rand -base64 32) --method 2022-blake3-chacha20-poly1305
-
-  # 强制重新安装
-  $0 --port 8388 --password <base64_password> --force
-
 EOF
                 exit 0
                 ;;
@@ -996,8 +990,8 @@ EOF
         validate_password "$ss_password" "$(get_key_bytes "$ss_method")"
 
         # 检查是否已安装
-        if [[ -f "$BINARY_PATH" && "$force_install" != true ]]; then
-            error "shadowsocks-rust 已安装。使用 --force 参数强制重新安装。"
+        if [[ -f "$BINARY_PATH" ]]; then
+            error "shadowsocks-rust 已安装，请先卸载后再安装。"
         fi
 
         info "开始检查依赖、下载并安装..."
