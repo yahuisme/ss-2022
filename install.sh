@@ -29,11 +29,11 @@ readonly SERVICE_START_WAIT=1
 readonly SERVICE_START_ATTEMPTS=5
 
 # --- 颜色定义 ---
-readonly C_RESET='\033[0m'
-readonly C_RED='\033[0;31m'
-readonly C_GREEN='\033[0;32m'
-readonly C_YELLOW='\033[1;33m'
-readonly C_BLUE='\033[0;34m'
+readonly C_RESET=$'\033[0m'
+readonly C_RED=$'\033[0;31m'
+readonly C_GREEN=$'\033[0;32m'
+readonly C_YELLOW=$'\033[1;33m'
+readonly C_BLUE=$'\033[0;34m'
 
 # --- 临时目录和失败恢复 ---
 readonly TMP_DIR=$(mktemp -d -t ss-rust.XXXXXX)
@@ -106,10 +106,10 @@ backup_install_state() {
 }
 
 # --- 日志函数 ---
-info() { echo -e "${C_BLUE}[信息]${C_RESET} $1" >&2; }
-success() { echo -e "${C_GREEN}[成功]${C_RESET} $1" >&2; }
-warn() { echo -e "${C_YELLOW}[警告]${C_RESET} $1" >&2; }
-error() { echo -e "${C_RED}[错误]${C_RESET} $1" >&2; exit 1; }
+info() { printf '%b[信息]%b %s\n' "$C_BLUE" "$C_RESET" "$1" >&2; }
+success() { printf '%b[成功]%b %s\n' "$C_GREEN" "$C_RESET" "$1" >&2; }
+warn() { printf '%b[警告]%b %s\n' "$C_YELLOW" "$C_RESET" "$1" >&2; }
+error() { printf '%b[错误]%b %s\n' "$C_RED" "$C_RESET" "$1" >&2; exit 1; }
 
 # --- 安全网络请求函数 ---
 safe_curl() {
@@ -565,9 +565,9 @@ manage_service() {
             fi
             ;;
         status)
-            echo -e "\n${C_YELLOW}=== 服务状态 ===${C_RESET}"
+            printf '%b\n' "\\n${C_YELLOW}=== 服务状态 ===${C_RESET}"
             systemctl status --full --no-pager ss-rust || true
-            echo -e "\n${C_YELLOW}=== 最新日志 ===${C_RESET}"
+            printf '%b\n' "\\n${C_YELLOW}=== 最新日志 ===${C_RESET}"
             journalctl -u ss-rust --no-pager -n 10 || true
             ;;
         *)
@@ -811,38 +811,38 @@ view_config() {
 
     {
         echo ""
-        echo -e "${C_GREEN}======================================${C_RESET}"
-        echo -e "  ${C_BLUE}Shadowsocks-2022 配置信息${C_RESET}"
-        echo -e "${C_GREEN}======================================${C_RESET}"
-        echo -e "  ${C_YELLOW}节点名称:${C_RESET}       ${node_name}"
+        printf '%b\n' "${C_GREEN}======================================${C_RESET}"
+        printf '%b\n' "  ${C_BLUE}Shadowsocks-2022 配置信息${C_RESET}"
+        printf '%b\n' "${C_GREEN}======================================${C_RESET}"
+        printf '%b\n' "  ${C_YELLOW}节点名称:${C_RESET}       ${node_name}"
         if [[ -n "$ip_address" ]]; then
-            echo -e "  ${C_YELLOW}服务器地址:${C_RESET}     ${ip_address}"
+            printf '%b\n' "  ${C_YELLOW}服务器地址:${C_RESET}     ${ip_address}"
         else
-            echo -e "  ${C_YELLOW}服务器地址:${C_RESET}     请手动填写服务器地址"
+            printf '%b\n' "  ${C_YELLOW}服务器地址:${C_RESET}     请手动填写服务器地址"
         fi
-        echo -e "  ${C_YELLOW}端口:${C_RESET}           ${port}"
-        echo -e "  ${C_YELLOW}密码:${C_RESET}           ${password}"
-        echo -e "  ${C_YELLOW}加密方式:${C_RESET}       ${method}"
-        echo -e "${C_GREEN}======================================${C_RESET}"
+        printf '%b\n' "  ${C_YELLOW}端口:${C_RESET}           ${port}"
+        printf '%b\n' "  ${C_YELLOW}密码:${C_RESET}           ${password}"
+        printf '%b\n' "  ${C_YELLOW}加密方式:${C_RESET}       ${method}"
+        printf '%b\n' "${C_GREEN}======================================${C_RESET}"
         echo ""
         if [[ -n "$ip_address" ]]; then
             ss_link=$(generate_ss_url "$ip_address" "$port" "$password" "$method" "$node_name")
-            echo -e "  ${C_GREEN}SS链接:${C_RESET}"
-            echo -e "  ${ss_link}"
+            printf '%b\n' "  ${C_GREEN}SS链接:${C_RESET}"
+            printf '%b\n' "  ${ss_link}"
         else
-            echo -e "  ${C_YELLOW}SS链接:${C_RESET} 无法生成，请手动填写服务器地址"
+            printf '%b\n' "  ${C_YELLOW}SS链接:${C_RESET} 无法生成，请手动填写服务器地址"
         fi
         echo ""
-        echo -e "  ${C_BLUE}提示:${C_RESET} 复制上面的SS链接导入到客户端即可使用"
-        echo -e "${C_GREEN}======================================${C_RESET}"
+        printf '%b\n' "  ${C_BLUE}提示:${C_RESET} 复制上面的SS链接导入到客户端即可使用"
+        printf '%b\n' "${C_GREEN}======================================${C_RESET}"
     } >&2
 }
 
 main_menu() {
     while true; do
         clear
-        echo -e "${C_GREEN}============================================================${C_RESET}"
-        echo -e "  ${C_BLUE}Shadowsocks-rust 管理脚本 (v${SCRIPT_VERSION})${C_RESET}"
+        printf '%b\n' "${C_GREEN}============================================================${C_RESET}"
+        printf '%b\n' "  ${C_BLUE}Shadowsocks-rust 管理脚本 (v${SCRIPT_VERSION})${C_RESET}"
         
         local status_info
         if [[ -f "$VERSION_FILE" ]]; then
@@ -855,23 +855,23 @@ main_menu() {
         else
             status_info="${C_RED}未安装${C_RESET}"
         fi
-        echo -e "  当前状态: ${status_info}"
+        printf '%b\n' "  当前状态: ${status_info}"
         
-        echo -e "${C_GREEN}============================================================${C_RESET}"
+        printf '%b\n' "${C_GREEN}============================================================${C_RESET}"
         echo ""
-        echo -e "  ${C_YELLOW}1.${C_RESET} 安装 Shadowsocks-rust"
-        echo -e "  ${C_YELLOW}2.${C_RESET} 更新 Shadowsocks-rust"
-        echo -e "  ${C_YELLOW}3.${C_RESET} 卸载 Shadowsocks-rust"
+        printf '%b\n' "  ${C_YELLOW}1.${C_RESET} 安装 Shadowsocks-rust"
+        printf '%b\n' "  ${C_YELLOW}2.${C_RESET} 更新 Shadowsocks-rust"
+        printf '%b\n' "  ${C_YELLOW}3.${C_RESET} 卸载 Shadowsocks-rust"
         echo "  ------------------------------------"
-        echo -e "  ${C_YELLOW}4.${C_RESET} 修改配置 (加密方式/端口/密码)"
-        echo -e "  ${C_YELLOW}5.${C_RESET} 查看配置信息"
+        printf '%b\n' "  ${C_YELLOW}4.${C_RESET} 修改配置 (加密方式/端口/密码)"
+        printf '%b\n' "  ${C_YELLOW}5.${C_RESET} 查看配置信息"
         echo "  ------------------------------------"
-        echo -e "  ${C_YELLOW}6.${C_RESET} 启动服务"
-        echo -e "  ${C_YELLOW}7.${C_RESET} 停止服务"
-        echo -e "  ${C_YELLOW}8.${C_RESET} 重启服务"
-        echo -e "  ${C_YELLOW}9.${C_RESET} 查看服务状态"
+        printf '%b\n' "  ${C_YELLOW}6.${C_RESET} 启动服务"
+        printf '%b\n' "  ${C_YELLOW}7.${C_RESET} 停止服务"
+        printf '%b\n' "  ${C_YELLOW}8.${C_RESET} 重启服务"
+        printf '%b\n' "  ${C_YELLOW}9.${C_RESET} 查看服务状态"
         echo "  ------------------------------------"
-        echo -e "  ${C_YELLOW}0.${C_RESET} 退出脚本"
+        printf '%b\n' "  ${C_YELLOW}0.${C_RESET} 退出脚本"
         echo ""
 
         read -p "请输入您的选项 [0-9]: " choice < /dev/tty
