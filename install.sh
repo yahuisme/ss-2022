@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="4.5"
+readonly SCRIPT_VERSION="26.08.27"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -37,12 +37,26 @@ readonly C_YELLOW=$'\033[1;33m'
 readonly C_BLUE=$'\033[0;34m'
 
 # --- 临时目录和失败恢复 ---
-readonly TMP_DIR=$(mktemp -d -t ss-rust.XXXXXX)
+TMP_DIR=""
+
+init_temp_dir() {
+    TMP_DIR=$(mktemp -d -t ss-rust.XXXXXX) ||
+        error "无法创建临时目录。"
+}
 
 cleanup() {
     if [[ -d "$TMP_DIR" ]]; then
         rm -rf "$TMP_DIR"
     fi
+}
+
+cleanup_uninstall_residue() {
+    # 清理中断操作可能留下的临时目录、原子替换文件和 systemd drop-in。
+    find /tmp -maxdepth 1 -type d -user root -name 'ss-rust.*' -exec rm -rf -- {} + 2>/dev/null || true
+    find /usr/local/bin -maxdepth 1 -type f -user root -name 'ss-rust.new.*' -delete 2>/dev/null || true
+    find /etc/ss-rust -maxdepth 1 -type f -user root \
+        \( -name 'config.json.tmp.*' -o -name 'ver.txt.new.*' \) -delete 2>/dev/null || true
+    rm -rf /etc/systemd/system/ss-rust.service.d /run/ss-rust
 }
 
 BACKUP_ACTIVE=false
@@ -169,9 +183,14 @@ decode_base64() {
 
 # --- 基础检查函数 ---
 check_root() {
-    if [[ "$EUID" -ne 0 ]]; then
+    if [[ "$EUID" -ne 0 && "${1:-}" != "-h" && "${1:-}" != "--help" ]]; then
         error "此脚本必须以 root 权限运行，请使用 sudo。"
     fi
+}
+
+check_systemd() {
+    command -v systemctl >/dev/null 2>&1 ||
+        error "未找到 systemd/systemctl，此脚本无法安装或管理服务。"
 }
 
 check_tty() {
@@ -643,6 +662,7 @@ run_uninstall_logic() {
         systemctl daemon-reload || error "systemd 重载失败，卸载未完成。"
         systemctl reset-failed ss-rust >/dev/null 2>&1 || true
     fi
+    cleanup_uninstall_residue
 
     success "卸载完成，未保留相关文件。"
 }
@@ -651,6 +671,7 @@ install_flow() {
     local configure="$1" port="${2:-}" password="${3:-}" method="${4:-$DEFAULT_ENCRYPTION_METHOD}" version="${5:-}"
     local os_type arch
 
+    check_systemd
     os_type=$(detect_os)
     check_dependencies "$os_type"
     arch=$(detect_arch)
@@ -943,7 +964,7 @@ main_menu() {
 
 # --- 脚本入口 ---
 main() {
-    check_root
+    check_root "${1:-}"
 
     local ss_port=""
     local ss_password=""
@@ -1004,6 +1025,8 @@ EOF
                 ;;
         esac
     done
+
+    init_temp_dir
 
     # 一键安装模式
     if [[ -n "$ss_port" && -n "$ss_password" ]]; then
