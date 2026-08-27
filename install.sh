@@ -73,6 +73,13 @@ restore_install_state() {
     fi
     if command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload >/dev/null 2>&1 || true
+        if [[ -f "${TMP_DIR}/was-enabled" ]]; then
+            systemctl enable ss-rust >/dev/null 2>&1 || warn "无法恢复服务开机自启状态。"
+        elif [[ -f "${TMP_DIR}/was-disabled" ]]; then
+            systemctl disable ss-rust >/dev/null 2>&1 || warn "无法恢复服务禁用状态。"
+        else
+            systemctl disable ss-rust >/dev/null 2>&1 || true
+        fi
         if [[ -f "${TMP_DIR}/old-service" && -f "${TMP_DIR}/was-active" ]]; then
             systemctl restart ss-rust >/dev/null 2>&1 || true
         elif [[ -f "${TMP_DIR}/old-service" ]]; then
@@ -96,14 +103,23 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 backup_install_state() {
-    BACKUP_ACTIVE=true
-    if [[ -f "$BINARY_PATH" ]]; then cp -p "$BINARY_PATH" "${TMP_DIR}/old-binary"; fi
-    if [[ -f "$VERSION_FILE" ]]; then cp -p "$VERSION_FILE" "${TMP_DIR}/old-version"; fi
-    if [[ -f "$CONFIG_PATH" ]]; then cp -p "$CONFIG_PATH" "${TMP_DIR}/old-config"; fi
-    if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then cp -p "$SYSTEMD_SERVICE_FILE" "${TMP_DIR}/old-service"; fi
+    INSTALL_COMMITTED=false
+    BACKUP_ACTIVE=false
+    if [[ -f "$BINARY_PATH" ]]; then cp -p "$BINARY_PATH" "${TMP_DIR}/old-binary" || error "备份旧程序失败，已中止操作。"; fi
+    if [[ -f "$VERSION_FILE" ]]; then cp -p "$VERSION_FILE" "${TMP_DIR}/old-version" || error "备份版本文件失败，已中止操作。"; fi
+    if [[ -f "$CONFIG_PATH" ]]; then cp -p "$CONFIG_PATH" "${TMP_DIR}/old-config" || error "备份配置文件失败，已中止操作。"; fi
+    if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then cp -p "$SYSTEMD_SERVICE_FILE" "${TMP_DIR}/old-service" || error "备份服务文件失败，已中止操作。"; fi
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet ss-rust 2>/dev/null; then
         : > "${TMP_DIR}/was-active"
     fi
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-enabled --quiet ss-rust 2>/dev/null; then
+            : > "${TMP_DIR}/was-enabled"
+        else
+            : > "${TMP_DIR}/was-disabled"
+        fi
+    fi
+    BACKUP_ACTIVE=true
 }
 
 # --- 日志函数 ---
@@ -158,6 +174,12 @@ check_root() {
     fi
 }
 
+check_tty() {
+    if ! ( : </dev/tty ) 2>/dev/null; then
+        error "交互模式需要可用的 TTY，请使用完整参数执行非交互安装。"
+    fi
+}
+
 # --- 端口可用性检查 ---
 check_port_available() {
     local port="$1"
@@ -172,6 +194,18 @@ check_port_available() {
             error "端口 ${port} 已被占用，请选择其他端口。"
         fi
     fi
+}
+
+validate_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ && "$port" -ge "$MIN_PORT" && "$port" -le "$MAX_PORT" ]] ||
+        error "端口 $port 无效，必须在 ${MIN_PORT}-${MAX_PORT} 范围内。"
+}
+
+validate_version() {
+    local version="$1"
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] ||
+        error "版本号格式无效: $version"
 }
 
 # --- 密码验证函数 ---
@@ -214,9 +248,7 @@ get_key_bytes() {
 validate_config_values() {
     local port="$1" password="$2" method="$3" key_bytes
 
-    if [[ ! "$port" =~ ^[0-9]+$ || "$port" -lt $MIN_PORT || "$port" -gt $MAX_PORT ]]; then
-        error "配置中的端口无效，必须在 ${MIN_PORT}-${MAX_PORT} 范围内。"
-    fi
+    validate_port "$port"
     key_bytes=$(get_key_bytes "$method")
     validate_password "$password" "$key_bytes"
 }
@@ -300,7 +332,7 @@ check_dependencies() {
         if [[ "${non_interactive:-false}" == "true" ]]; then
             info "将在非交互模式下自动安装..."
         else
-            read -p "是否需要现在自动安装它们? (Y/n): " choice < /dev/tty
+            read -r -p "是否需要现在自动安装它们? (Y/n): " choice < /dev/tty
             if [[ "$choice" =~ ^[Nn]$ ]]; then
                 error "缺少必要的依赖，脚本无法继续运行。"
             fi
@@ -356,8 +388,7 @@ get_latest_version() {
     fi
     
     latest_version="${latest_version#v}"
-    [[ "$latest_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || \
-        error "获取到的版本号格式无效。"
+    validate_version "$latest_version"
     echo "$latest_version"
 }
 
@@ -460,7 +491,7 @@ generate_config() {
     local key_bytes
 
     if [[ -z "${3:-}" && -z "$port" ]]; then
-        read -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (默认: 1): " method_choice < /dev/tty
+        read -r -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (默认: 1): " method_choice < /dev/tty
         [[ "$method_choice" == "2" ]] && method="2022-blake3-chacha20-poly1305"
         [[ -z "$method_choice" || "$method_choice" == "1" || "$method_choice" == "2" ]] || error "无效的加密方式选项"
     fi
@@ -472,7 +503,7 @@ generate_config() {
     # 端口验证和输入
     if [[ -z "$port" ]]; then
         while true; do
-            read -p "请输入 Shadowsocks 端口 [${MIN_PORT}-${MAX_PORT}] (默认: ${DEFAULT_PORT}): " port < /dev/tty
+            read -r -p "请输入 Shadowsocks 端口 [${MIN_PORT}-${MAX_PORT}] (默认: ${DEFAULT_PORT}): " port < /dev/tty
             port=${port:-$DEFAULT_PORT}
             if [[ "$port" =~ ^[0-9]+$ && "$port" -ge $MIN_PORT && "$port" -le $MAX_PORT ]]; then
                 check_port_available "$port"
@@ -483,15 +514,13 @@ generate_config() {
         done
     else
         info "使用指定的端口: $port"
-        if [[ ! "$port" =~ ^[0-9]+$ || "$port" -lt $MIN_PORT || "$port" -gt $MAX_PORT ]]; then
-            error "端口 $port 无效，必须在 ${MIN_PORT}-${MAX_PORT} 范围内。"
-        fi
+        validate_port "$port"
         check_port_available "$port"
     fi
 
     # 密码验证和输入
     if [[ -z "$password" ]]; then
-        read -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input < /dev/tty
+        read -r -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input < /dev/tty
         if [[ -z "$password_input" ]]; then
             info "为 ${method} 生成 ${key_bytes} 字节随机密码..."
             password=$(openssl rand -base64 "$key_bytes")
@@ -593,24 +622,29 @@ run_uninstall_logic() {
     info "正在卸载 shadowsocks-rust..."
     
     # 停止并禁用服务
-    if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then
-        info "正在停止并禁用服务..."
-        systemctl stop ss-rust &>/dev/null || true
-        systemctl disable ss-rust &>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1; then
+        if [[ -f "$SYSTEMD_SERVICE_FILE" ]] || systemctl is-enabled --quiet ss-rust 2>/dev/null; then
+            info "正在停止并禁用服务..."
+            systemctl stop ss-rust &>/dev/null || error "无法停止 ss-rust 服务，已中止卸载。"
+            if systemctl is-active --quiet ss-rust 2>/dev/null; then
+                error "ss-rust 服务仍在运行，已中止卸载。"
+            fi
+            systemctl disable ss-rust &>/dev/null || error "无法禁用 ss-rust 服务，已中止卸载。"
+        fi
     fi
-    
-    # 删除所有相关文件和目录
-    info "正在删除所有相关文件和配置文件..."
-    rm -f "$BINARY_PATH"
-    rm -f "$SYSTEMD_SERVICE_FILE"
+
+    # 删除所有相关文件、配置和临时备份
+    info "正在删除所有相关文件和配置..."
+    rm -f "$BINARY_PATH" "$SYSTEMD_SERVICE_FILE"
     rm -rf "$INSTALL_DIR"
-    
-    # 重载 systemd
-    if command -v systemctl &> /dev/null; then
-        systemctl daemon-reload
+    cleanup
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload || error "systemd 重载失败，卸载未完成。"
+        systemctl reset-failed ss-rust >/dev/null 2>&1 || true
     fi
-    
-    success "卸载完成。"
+
+    success "卸载完成，未保留相关文件。"
 }
 
 install_flow() {
@@ -644,7 +678,7 @@ install_flow() {
 do_install() {
     if [[ -f "$BINARY_PATH" ]]; then
         warn "检测到 shadowsocks-rust 已安装。"
-        read -p "是否要重新安装? (y/N): " choice < /dev/tty
+        read -r -p "是否要重新安装? (y/N): " choice < /dev/tty
         if [[ ! "$choice" =~ ^[Yy]$ ]]; then
             info "安装已取消。"
             return
@@ -663,14 +697,12 @@ do_update() {
         error "shadowsocks-rust 未安装。请先执行安装。"
     fi
 
-    local current_version latest_version os_type
-    os_type=$(detect_os)
-    check_dependencies "$os_type"
+    local current_version latest_version
     [[ -s "$VERSION_FILE" ]] || error "版本文件缺失或为空，无法执行更新。"
     current_version=$(<"$VERSION_FILE")
-    [[ "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || \
-        error "版本文件格式无效，无法执行更新。"
-    load_config
+    validate_version "$current_version"
+    IFS=$'\t' read -r current_port current_password current_method < <(load_config)
+    validate_config_values "$current_port" "$current_password" "$current_method"
     latest_version=$(get_latest_version)
 
     if [[ "$current_version" == "$latest_version" ]]; then
@@ -685,12 +717,12 @@ do_update() {
 }
 
 do_uninstall() {
-    if [[ ! -f "$BINARY_PATH" && ! -d "$INSTALL_DIR" ]]; then
+    if [[ ! -f "$BINARY_PATH" && ! -d "$INSTALL_DIR" && ! -f "$SYSTEMD_SERVICE_FILE" ]]; then
         warn "未发现任何 shadowsocks-rust 相关文件，无需卸载。"
         return
     fi
 
-    read -p "您确定要完全卸载 shadowsocks-rust 吗? (Y/n): " choice < /dev/tty
+    read -r -p "您确定要完全卸载 shadowsocks-rust 吗? (Y/n): " choice < /dev/tty
     if [[ "$choice" =~ ^[Nn]$ ]]; then
         info "已取消卸载操作。"
         return
@@ -701,18 +733,15 @@ do_uninstall() {
 
 load_config() {
     [[ -f "$CONFIG_PATH" ]] || error "找不到配置文件，请先执行安装。"
-    config_values=$(jq -er 'select((.server_port|type)=="number" and (.server_port|floor)==.server_port and (.password|type)=="string" and (.method|type)=="string") | [.server_port, .password, .method] | @tsv' "$CONFIG_PATH" 2>/dev/null) || \
+    jq -cer 'if type == "object" and (.server_port|type)=="number" and (.server_port|floor)==.server_port and (.password|type)=="string" and (.method|type)=="string" then [.server_port, .password, .method] | @tsv else error("invalid config") end' "$CONFIG_PATH" 2>/dev/null ||
         error "配置文件格式错误，无法读取必要信息。"
-    IFS=$'\t' read -r current_port current_password current_method <<< "$config_values"
-    [[ -n "$current_port" && -n "$current_password" && -n "$current_method" ]] || \
-        error "配置文件格式错误，无法读取必要信息。"
-    validate_config_values "$current_port" "$current_password" "$current_method"
 }
 
 do_modify_config() {
     info "加载当前配置..."
     local current_port current_password current_method key_bytes new_port new_password
-    load_config
+    IFS=$'\t' read -r current_port current_password current_method < <(load_config)
+    validate_config_values "$current_port" "$current_password" "$current_method"
     key_bytes=$(get_key_bytes "$current_method")
 
     info "当前配置："
@@ -724,7 +753,7 @@ do_modify_config() {
 
     local new_method method_choice
     while true; do
-        read -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (当前: ${current_method}, 回车保留): " method_choice < /dev/tty
+        read -r -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (当前: ${current_method}, 回车保留): " method_choice < /dev/tty
         if [[ -z "$method_choice" ]]; then
             new_method="$current_method"
             break
@@ -742,7 +771,7 @@ do_modify_config() {
 
     # 端口输入和验证
     while true; do
-        read -p "新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${current_port}): " new_port < /dev/tty
+        read -r -p "新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${current_port}): " new_port < /dev/tty
         new_port=${new_port:-$current_port}
         if [[ "$new_port" =~ ^[0-9]+$ && "$new_port" -ge $MIN_PORT && "$new_port" -le $MAX_PORT ]]; then
             if [[ "$new_port" != "$current_port" ]]; then
@@ -755,7 +784,7 @@ do_modify_config() {
     done
 
     # 密码输入和验证
-    read -p "新密码 (当前: ${current_password}, 留空保留; 切换加密方式时留空将重新生成, 输入 'random' 生成新的): " new_password_input < /dev/tty
+    read -r -p "新密码 (当前: ${current_password}, 留空保留; 切换加密方式时留空将重新生成, 输入 'random' 生成新的): " new_password_input < /dev/tty
     if [[ -z "$new_password_input" ]]; then
         if [[ "$new_method" != "$current_method" ]]; then
             info "加密方式已更改，正在生成符合新加密方式的随机密码..."
@@ -808,13 +837,12 @@ generate_ss_url() {
         "$encoded_userinfo" "$ip_address" "$port" "$encoded_name"
 }
 
+# shellcheck disable=SC2120
 view_config() {
     local ip_address="${1:-}"
     local port password method node_name ss_link
-    load_config
-    port="$current_port"
-    password="$current_password"
-    method="$current_method"
+    IFS=$'\t' read -r port password method < <(load_config)
+    validate_config_values "$port" "$password" "$method"
     node_name="$(hostname)-ss2022"
 
     [[ -n "$ip_address" ]] || ip_address=$(get_public_ip) || ip_address=""
@@ -887,7 +915,7 @@ main_menu() {
         printf '%b\n' "  ${C_YELLOW}0.${C_RESET} 退出脚本"
         echo ""
 
-        read -p "请输入您的选项 [0-9]: " choice < /dev/tty
+        read -r -p "请输入您的选项 [0-9]: " choice < /dev/tty
 
         case "$choice" in
             1) do_install ;;
@@ -909,7 +937,7 @@ main_menu() {
         esac
 
         echo ""
-        read -p "按回车键返回主菜单..." < /dev/tty
+        read -r -p "按回车键返回主菜单..." < /dev/tty
     done
 }
 
@@ -1004,7 +1032,7 @@ EOF
     elif [[ -n "$ss_port" || -n "$ss_password" ]]; then
         error "一键安装模式需要同时提供 --port 和 --password 参数。"
     else
-        # 交互模式
+        check_tty
         main_menu
     fi
 }
