@@ -23,13 +23,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/instal
 
 先生成对应长度的 Base64 密钥，再作为 `--password` 传入。
 
-AES-128-GCM（16 字节）：
+2022-BLAKE3-AES-128-GCM（16 字节）：
 
 ```bash
 PASSWORD="$(openssl rand -base64 16)" && bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-aes-128-gcm
 ```
 
-ChaCha20-Poly1305（32 字节）：
+2022-BLAKE3-CHACHA20-POLY1305（32 字节）：
 
 ```bash
 PASSWORD="$(openssl rand -base64 32)" && bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-chacha20-poly1305
