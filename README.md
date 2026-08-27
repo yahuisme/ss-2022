@@ -25,7 +25,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/instal
 `--port` 与 `--password` 必须同时提供。密码必须是对应长度的 Base64 密钥：
 
 ```bash
-PASSWORD="$(openssl rand -base64 16)" && bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD"
+PASSWORD="$(openssl rand -base64 16)" && bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --port 8388 --password "$PASSWORD" --method 2022-blake3-aes-128-gcm
 ```
 
 ```bash
