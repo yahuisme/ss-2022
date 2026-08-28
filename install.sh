@@ -326,10 +326,11 @@ detect_os() {
 }
 
 detect_arch() {
+    # 使用静态链接的 musl 构建，不依赖系统 glibc 版本，兼容老发行版。
     case "$(uname -m)" in
-        x86_64) echo "x86_64-unknown-linux-gnu" ;;
-        aarch64) echo "aarch64-unknown-linux-gnu" ;;
-        armv7l) echo "armv7-unknown-linux-gnueabihf" ;;
+        x86_64) echo "x86_64-unknown-linux-musl" ;;
+        aarch64) echo "aarch64-unknown-linux-musl" ;;
+        armv7l) echo "armv7-unknown-linux-musleabihf" ;;
         *) error "不支持的CPU架构: $(uname -m). 支持的架构: x86_64, aarch64, armv7l" ;;
     esac
 }
@@ -433,9 +434,12 @@ download_and_install() {
     if [[ ! -f "$download_path" || ! -s "$download_path" ]]; then
         error "下载的文件无效或为空。"
     fi
+    # 兼容性提取校验和：不依赖 awk 正则方言（老版 mawk/busybox 不支持 {n} 区间表达式），
+    # 取校验文件首个以 64 位十六进制字符开头的字段。
     local checksum
-    checksum=$(awk 'match($0,/^[[:xdigit:]]{64}/){print substr($0,RSTART,RLENGTH); exit}' "$checksum_path")
-    if [[ ! -f "$checksum_path" || ! -s "$checksum_path" || -z "$checksum" ]]; then
+    checksum=$(tr -s ' \t\n' '  \n' <"$checksum_path" | head -n1 | cut -d' ' -f1)
+    checksum=${checksum%%[^0-9A-Fa-f]*}
+    if [[ ${#checksum} -ne 64 ]]; then
         error "下载的校验文件无效或为空。"
     fi
     if ! printf '%s  %s\n' "$checksum" "$download_path" | sha256sum -c - >/dev/null; then
