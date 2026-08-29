@@ -76,7 +76,7 @@ restore_install_state() {
         rm -f "$VERSION_FILE" 2>/dev/null || true
     fi
     if [[ -f "${TMP_DIR}/old-config" ]]; then
-        install -m 600 "${TMP_DIR}/old-config" "$CONFIG_PATH" 2>/dev/null || true
+        install -m 644 "${TMP_DIR}/old-config" "$CONFIG_PATH" 2>/dev/null || true
     else
         rm -f "$CONFIG_PATH" 2>/dev/null || true
     fi
@@ -91,8 +91,6 @@ restore_install_state() {
             systemctl enable ss-rust >/dev/null 2>&1 || warn "无法恢复服务开机自启状态。"
         elif [[ -f "${TMP_DIR}/was-disabled" ]]; then
             systemctl disable ss-rust >/dev/null 2>&1 || warn "无法恢复服务禁用状态。"
-        else
-            systemctl disable ss-rust >/dev/null 2>&1 || true
         fi
         if [[ -f "${TMP_DIR}/old-service" && -f "${TMP_DIR}/was-active" ]]; then
             systemctl restart ss-rust >/dev/null 2>&1 || true
@@ -100,6 +98,8 @@ restore_install_state() {
             systemctl stop ss-rust >/dev/null 2>&1 || true
         fi
     fi
+    # 清理原子替换可能残留的临时文件
+    rm -f "${BINARY_PATH}.new."* "${VERSION_FILE}.new."* "${CONFIG_PATH}.tmp."* 2>/dev/null || true
 }
 
 on_exit() {
@@ -143,22 +143,17 @@ warn() { printf '%b[警告]%b %s\n' "$C_YELLOW" "$C_RESET" "$1" >&2; }
 error() { printf '%b[错误]%b %s\n' "$C_RED" "$C_RESET" "$1" >&2; exit 1; }
 
 # --- 安全网络请求函数 ---
+readonly CURL_USER_AGENT="ss-rust-manager/$SCRIPT_VERSION"
+
 safe_curl() {
     local url="$1"
-    local retry=0
 
-    while [[ $retry -lt $MAX_RETRIES ]]; do
-        if curl -s --fail --max-time "$NETWORK_TIMEOUT" \
-                --user-agent "ss-rust-manager/$SCRIPT_VERSION" \
-                --tlsv1.2 "$url" 2>/dev/null; then
-            return 0
-        fi
-        retry=$((retry + 1))
-        if [[ $retry -lt $MAX_RETRIES ]]; then
-            sleep "$retry"
-        fi
-    done
-    return 1
+    curl -s -fL --retry "$MAX_RETRIES" \
+        --connect-timeout "$NETWORK_TIMEOUT" \
+        --max-time "$NETWORK_TIMEOUT" \
+        --tlsv1.2 \
+        --user-agent "$CURL_USER_AGENT" \
+        "$url"
 }
 
 download_file() {
@@ -169,7 +164,7 @@ download_file() {
         --connect-timeout "$NETWORK_TIMEOUT" \
         --max-time "$DOWNLOAD_TIMEOUT" \
         --tlsv1.2 \
-        --user-agent "ss-rust-manager/$SCRIPT_VERSION" \
+        --user-agent "$CURL_USER_AGENT" \
         -o "$output" "$url"
 }
 
@@ -217,7 +212,8 @@ check_port_available() {
 
 validate_port() {
     local port="$1"
-    [[ "$port" =~ ^[0-9]+$ && "$port" -ge "$MIN_PORT" && "$port" -le "$MAX_PORT" ]] ||
+    # 拒绝前导 0 与 0 本身：避免 bash 八进制解析歧义，且端口应无前导零
+    [[ "$port" =~ ^[1-9][0-9]*$ && "$port" -le "$MAX_PORT" ]] ||
         error "端口 $port 无效，必须在 ${MIN_PORT}-${MAX_PORT} 范围内。"
 }
 
@@ -237,7 +233,7 @@ validate_password() {
         error "密码必须是有效的 Base64 编码字符串。"
     fi
     local decoded_file canonical_password
-    decoded_file=$(mktemp "${TMP_DIR}/decoded-key.XXXXXX")
+    decoded_file=$(mktemp "${TMP_DIR}/decoded-key.XXXXXX") || error "创建临时文件失败。"
     if ! printf '%s' "$password" | decode_base64 >"$decoded_file" 2>/dev/null; then
         rm -f "$decoded_file"
         error "密码必须是有效的 Base64 编码字符串。"
@@ -272,7 +268,41 @@ validate_config_values() {
     validate_password "$password" "$key_bytes"
 }
 
+# 宽松校验：用于读取/更新既有配置，不强制规范 Base64（shadowsocks-rust 运行时接受非规范 key），
+# 避免用户手动修改过的合法配置阻断更新、修改或查看。
+validate_existing_password() {
+    local password="$1" key_bytes="$2"
+
+    # 仅检查字符集与解码长度；不要求 4 的倍数长度（无 padding 的 base64url 合法）
+    if [[ ! "$password" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+        error "配置中的密码不是有效的 Base64 字符串，请使用选项 4 重新设置密码。"
+    fi
+    local decoded_len
+    decoded_len=$(printf '%s' "$password" | decode_base64 2>/dev/null | wc -c)
+    if [[ "$decoded_len" -ne "$key_bytes" ]]; then
+        error "配置中的密码解码后长度（${decoded_len} 字节）与加密方式要求的 ${key_bytes} 字节不匹配，请使用选项 4 重新设置密码。"
+    fi
+}
+
+validate_existing_config_values() {
+    local port="$1" password="$2" method="$3" key_bytes
+
+    validate_port "$port"
+    key_bytes=$(get_key_bytes "$method")
+    validate_existing_password "$password" "$key_bytes"
+}
+
 get_public_ip() {
+    # 优先使用缓存的公网地址，避免每次查看配置都发起网络请求
+    local cached_ip=""
+    if [[ -f "${INSTALL_DIR}/.public-ip" ]]; then
+        cached_ip=$(<"${INSTALL_DIR}/.public-ip")
+    fi
+    if [[ -n "$cached_ip" ]]; then
+        echo "$cached_ip"
+        return 0
+    fi
+
     info "正在查询公网IP地址..."
     local ip=""
     local ipv4_services=("https://api.ipify.org" "https://ip.sb")
@@ -285,10 +315,11 @@ get_public_ip() {
                 local valid=true octet
                 IFS=. read -ra octets <<< "$ip"
                 for octet in "${octets[@]}"; do
-                    [[ "$octet" -le 255 ]] || valid=false
+                    [[ $((10#$octet)) -le 255 ]] || valid=false
                 done
                 if [[ "$valid" == true ]]; then
                     echo "$ip"
+                    printf '%s\n' "$ip" > "${INSTALL_DIR}/.public-ip" 2>/dev/null || true
                     success "成功获取公网 IPv4 地址。"
                     return 0
                 fi
@@ -303,6 +334,7 @@ get_public_ip() {
         if ip=$(safe_curl "$service" | tr -d '[:space:]'); then
             if [[ "$ip" =~ ^[0-9a-fA-F:]+$ && "$ip" == *:* ]]; then
                 echo "[$ip]"
+                printf '%s\n' "[$ip]" > "${INSTALL_DIR}/.public-ip" 2>/dev/null || true
                 success "成功获取公网 IPv6 地址。"
                 return 0
             fi
@@ -401,8 +433,10 @@ get_latest_version() {
     info "正在获取 shadowsocks-rust 的最新版本号..."
     local latest_version
     
-    latest_version=$(safe_curl "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -r '.tag_name // empty')
-    
+    if ! latest_version=$(safe_curl "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -r '.tag_name // empty'); then
+        error "获取最新版本失败，请检查网络连接或稍后重试。"
+    fi
+
     if [[ -z "$latest_version" ]]; then
         error "获取最新版本失败，请检查网络连接或稍后重试。"
     fi
@@ -431,15 +465,13 @@ download_and_install() {
     fi
 
     info "正在验证下载文件..."
-    if [[ ! -f "$download_path" || ! -s "$download_path" ]]; then
+    if [[ ! -s "$download_path" ]]; then
         error "下载的文件无效或为空。"
     fi
-    # 兼容性提取校验和：不依赖 awk 正则方言（老版 mawk/busybox 不支持 {n} 区间表达式），
-    # 取校验文件首个以 64 位十六进制字符开头的字段。
+    # 提取校验和：取首行首个字段（read 原生处理，兼容所有 awk 方言与 CRLF）
     local checksum
-    checksum=$(tr -s ' \t\n' '  \n' <"$checksum_path" | head -n1 | cut -d' ' -f1)
-    checksum=${checksum%%[^0-9A-Fa-f]*}
-    if [[ ${#checksum} -ne 64 ]]; then
+    read -r checksum _ < "$checksum_path" || error "下载的校验文件无效或为空。"
+    if [[ ! "$checksum" =~ ^[0-9A-Fa-f]{64}$ ]]; then
         error "下载的校验文件无效或为空。"
     fi
     if ! printf '%s  %s\n' "$checksum" "$download_path" | sha256sum -c - >/dev/null; then
@@ -458,13 +490,13 @@ download_and_install() {
     # 先准备临时文件，再原子替换，避免写入中断留下损坏二进制。
     mkdir -p "$INSTALL_DIR"
     local new_binary
-    new_binary=$(mktemp "${BINARY_PATH}.new.XXXXXX")
+    new_binary=$(mktemp "${BINARY_PATH}.new.XXXXXX") || error "创建临时文件失败。"
     install -m 755 "${TMP_DIR}/ssserver" "$new_binary"
     mv -f "$new_binary" "$BINARY_PATH"
 
     # 创建版本文件
     local new_version
-    new_version=$(mktemp "${VERSION_FILE}.new.XXXXXX")
+    new_version=$(mktemp "${VERSION_FILE}.new.XXXXXX") || error "创建临时文件失败。"
     printf '%s\n' "$version" > "$new_version"
     chmod 644 "$new_version"
     chown root:root "$new_version"
@@ -484,7 +516,7 @@ write_config() {
     
     # 生成配置文件
     local tmp_config
-    tmp_config=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
+    tmp_config=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX") || error "创建临时文件失败。"
 
     jq -n \
         --argjson server_port "$port" \
@@ -495,14 +527,14 @@ write_config() {
             "server_port": $server_port,
             "password": $password,
             "method": $method,
-            "fast_open": true,
+            "fast_open": false,
             "mode": "tcp_and_udp",
             "timeout": 300,
             "no_delay": true
         }' > "$tmp_config"
     
-    # 设置严格的文件权限
-    chmod 600 "$tmp_config"
+    # 设置严格的文件权限（nobody 用户运行需可读；root 拥有）
+    chmod 644 "$tmp_config"
     chown root:root "$tmp_config"
     mv -f "$tmp_config" "$CONFIG_PATH"
 }
@@ -528,9 +560,11 @@ generate_config() {
         while true; do
             read -r -p "请输入 Shadowsocks 端口 [${MIN_PORT}-${MAX_PORT}] (默认: ${DEFAULT_PORT}): " port < /dev/tty
             port=${port:-$DEFAULT_PORT}
-            if [[ "$port" =~ ^[0-9]+$ && "$port" -ge $MIN_PORT && "$port" -le $MAX_PORT ]]; then
-                check_port_available "$port"
-                break
+            if [[ "$port" =~ ^[1-9][0-9]*$ && "$port" -le $MAX_PORT ]]; then
+                if ( check_port_available "$port" 2>/dev/null ); then
+                    break
+                fi
+                warn "端口 ${port} 已被占用，请换一个端口。"
             else
                 warn "输入无效，请输入一个 ${MIN_PORT} 到 ${MAX_PORT} 之间的数字。"
             fi
@@ -546,7 +580,7 @@ generate_config() {
         read -r -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input < /dev/tty
         if [[ -z "$password_input" ]]; then
             info "为 ${method} 生成 ${key_bytes} 字节随机密码..."
-            password=$(openssl rand -base64 "$key_bytes")
+            password=$(openssl rand -base64 "$key_bytes") || error "生成随机密码失败。"
             success "已生成随机密码。"
         else
             password=$password_input
@@ -572,8 +606,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=nobody
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 ExecStart=$BINARY_PATH -c $CONFIG_PATH
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
@@ -646,13 +680,24 @@ run_uninstall_logic() {
     
     # 停止并禁用服务
     if command -v systemctl >/dev/null 2>&1; then
-        if [[ -f "$SYSTEMD_SERVICE_FILE" ]] || systemctl is-enabled --quiet ss-rust 2>/dev/null; then
+        if [[ -f "$SYSTEMD_SERVICE_FILE" ]] || systemctl is-enabled --quiet ss-rust 2>/dev/null || systemctl is-active --quiet ss-rust 2>/dev/null; then
             info "正在停止并禁用服务..."
-            systemctl stop ss-rust &>/dev/null || error "无法停止 ss-rust 服务，已中止卸载。"
-            if systemctl is-active --quiet ss-rust 2>/dev/null; then
-                error "ss-rust 服务仍在运行，已中止卸载。"
+            if ! systemctl stop ss-rust &>/dev/null; then
+                if [[ ! -f "$SYSTEMD_SERVICE_FILE" ]]; then
+                    # 服务文件缺失（可能被手动删除），直接终止残留进程
+                    warn "服务文件缺失，正在直接终止 ss-rust 进程..."
+                    pkill -x ss-rust &>/dev/null || true
+                else
+                    error "无法停止 ss-rust 服务，已中止卸载。"
+                fi
             fi
-            systemctl disable ss-rust &>/dev/null || error "无法禁用 ss-rust 服务，已中止卸载。"
+            if systemctl is-active --quiet ss-rust 2>/dev/null; then
+                pkill -x ss-rust &>/dev/null || true
+                if systemctl is-active --quiet ss-rust 2>/dev/null; then
+                    error "ss-rust 服务仍在运行，已中止卸载。"
+                fi
+            fi
+            systemctl disable ss-rust &>/dev/null || warn "无法禁用 ss-rust 服务自启，请手动执行 systemctl disable ss-rust。"
         fi
     fi
 
@@ -663,7 +708,7 @@ run_uninstall_logic() {
     cleanup
 
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl daemon-reload || error "systemd 重载失败，卸载未完成。"
+        systemctl daemon-reload || warn "systemd 重载失败，请手动执行 systemctl daemon-reload。"
         systemctl reset-failed ss-rust >/dev/null 2>&1 || true
     fi
     cleanup_uninstall_residue
@@ -680,9 +725,15 @@ install_flow() {
     check_dependencies "$os_type"
     arch=$(detect_arch)
     backup_install_state
-    if [[ -f "$SYSTEMD_SERVICE_FILE" ]] && systemctl is-active --quiet ss-rust 2>/dev/null; then
-        info "正在暂时停止旧服务，以安全替换程序..."
-        systemctl stop ss-rust || error "无法停止旧服务，已中止操作。"
+    if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then
+        if systemctl is-active --quiet ss-rust 2>/dev/null; then
+            info "正在暂时停止旧服务，以安全替换程序..."
+            systemctl stop ss-rust || error "无法停止旧服务，已中止操作。"
+        fi
+    elif pgrep -x ss-rust >/dev/null 2>&1; then
+        # 服务文件缺失但进程仍在运行（异常残留），直接终止
+        warn "检测到残留的 ss-rust 进程（服务文件缺失），正在终止..."
+        pkill -x ss-rust || error "无法终止残留的 ss-rust 进程，已中止操作。"
     fi
     version=${version:-$(get_latest_version)}
     download_and_install "$version" "$arch"
@@ -698,8 +749,12 @@ install_flow() {
     # 仅首次安装时创建服务并设为自启；更新/重装保留用户既有的 unit 与自启状态。
     if [[ ! -f "$SYSTEMD_SERVICE_FILE" ]]; then
         create_systemd_service
+        manage_service "restart"
+    elif [[ -f "${TMP_DIR}/was-active" ]]; then
+        manage_service "restart"
+    else
+        info "服务在操作前处于停止状态，完成后保持停止。"
     fi
-    manage_service "restart"
     INSTALL_COMMITTED=true
 }
 
@@ -741,7 +796,7 @@ do_update() {
     current_version=$(<"$VERSION_FILE")
     validate_version "$current_version"
     IFS=$'\t' read -r current_port current_password current_method < <(load_config)
-    validate_config_values "$current_port" "$current_password" "$current_method"
+    validate_existing_config_values "$current_port" "$current_password" "$current_method"
     latest_version=$(get_latest_version)
 
     if [[ "$current_version" == "$latest_version" ]]; then
@@ -780,7 +835,7 @@ do_modify_config() {
     info "加载当前配置..."
     local current_port current_password current_method key_bytes new_port new_password
     IFS=$'\t' read -r current_port current_password current_method < <(load_config)
-    validate_config_values "$current_port" "$current_password" "$current_method"
+    validate_existing_config_values "$current_port" "$current_password" "$current_method"
     key_bytes=$(get_key_bytes "$current_method")
 
     info "当前配置："
@@ -812,7 +867,7 @@ do_modify_config() {
     while true; do
         read -r -p "新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${current_port}): " new_port < /dev/tty
         new_port=${new_port:-$current_port}
-        if [[ "$new_port" =~ ^[0-9]+$ && "$new_port" -ge $MIN_PORT && "$new_port" -le $MAX_PORT ]]; then
+        if [[ "$new_port" =~ ^[1-9][0-9]*$ && "$new_port" -le $MAX_PORT ]]; then
             if [[ "$new_port" != "$current_port" ]]; then
                 check_port_available "$new_port"
             fi
@@ -827,14 +882,14 @@ do_modify_config() {
     if [[ -z "$new_password_input" ]]; then
         if [[ "$new_method" != "$current_method" ]]; then
             info "加密方式已更改，正在生成符合新加密方式的随机密码..."
-            new_password=$(openssl rand -base64 "$key_bytes")
+            new_password=$(openssl rand -base64 "$key_bytes") || error "生成随机密码失败。"
             success "已生成新的随机密码。"
         else
             new_password=$current_password
         fi
     elif [[ "$new_password_input" == "random" ]]; then
         info "正在生成新的随机密码..."
-        new_password=$(openssl rand -base64 "$key_bytes")
+        new_password=$(openssl rand -base64 "$key_bytes") || error "生成随机密码失败。"
         success "新密码: ${new_password}"
     else
         new_password=$new_password_input
@@ -853,8 +908,12 @@ do_modify_config() {
     info "正在写入新配置..."
     write_config "$new_port" "$new_password" "$new_method"
 
-    info "正在重启服务以应用新配置..."
-    manage_service "restart"
+    if [[ -f "${TMP_DIR}/was-active" ]]; then
+        info "正在重启服务以应用新配置..."
+        manage_service "restart"
+    else
+        info "服务当前处于停止状态，配置已更新，将在下次启动时生效。"
+    fi
     INSTALL_COMMITTED=true
     
     success "配置修改成功！"
@@ -881,7 +940,7 @@ view_config() {
     local ip_address="${1:-}"
     local port password method node_name ss_link
     IFS=$'\t' read -r port password method < <(load_config)
-    validate_config_values "$port" "$password" "$method"
+    validate_existing_config_values "$port" "$password" "$method"
     node_name="$(hostname)-ss2022"
 
     [[ -n "$ip_address" ]] || ip_address=$(get_public_ip) || ip_address=""
@@ -954,7 +1013,7 @@ main_menu() {
         printf '%b\n' "  ${C_YELLOW}0.${C_RESET} 退出脚本"
         echo ""
 
-        read -r -p "请输入您的选项 [0-9]: " choice < /dev/tty
+        read -r -p "请输入您的选项 [0-9]: " choice < /dev/tty || { info "输入终止，退出脚本。"; exit 0; }
 
         case "$choice" in
             # 菜单操作在子 shell 中执行：内部 error() 只终止本次操作，不退出整个脚本。
@@ -978,7 +1037,7 @@ main_menu() {
         esac
 
         echo ""
-        read -r -p "按回车键返回主菜单..." < /dev/tty
+        read -r -p "按回车键返回主菜单..." < /dev/tty || break
     done
 }
 
@@ -1015,6 +1074,11 @@ main() {
                 ss_method="$2"
                 shift 2
                 ;;
+            -u|--uninstall)
+                init_temp_dir
+                run_uninstall_logic
+                exit 0
+                ;;
             -h|--help)
                 cat << EOF
 Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
@@ -1026,6 +1090,7 @@ Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
   -p, --port <端口>     指定端口 (1-65535)
   -w, --password <密码> 指定 Base64 编码的密钥
   -m, --method <方式>   2022-blake3-aes-128-gcm 或 2022-blake3-chacha20-poly1305
+  -u, --uninstall       完全卸载 shadowsocks-rust（无需交互确认）
   -h, --help            显示此帮助信息
 
 示例:
@@ -1054,15 +1119,13 @@ EOF
         info "=== 进入一键安装模式 ==="
 
         # 验证参数
-        if [[ ! "$ss_port" =~ ^[0-9]+$ || "$ss_port" -lt $MIN_PORT || "$ss_port" -gt $MAX_PORT ]]; then
-            error "端口 $ss_port 无效，必须在 ${MIN_PORT}-${MAX_PORT} 范围内"
-        fi
+        validate_port "$ss_port"
         
         validate_password "$ss_password" "$(get_key_bytes "$ss_method")"
 
-        # 检查是否已安装
-        if [[ -f "$BINARY_PATH" ]]; then
-            error "shadowsocks-rust 已安装，请先卸载后再安装。"
+        # 检查是否已安装或存在残留（程序/配置/服务文件任一存在都视为已安装）
+        if [[ -f "$BINARY_PATH" || -f "$CONFIG_PATH" || -f "$SYSTEMD_SERVICE_FILE" ]]; then
+            error "检测到 shadowsocks-rust 已安装或存在残留文件，请先执行 --uninstall 清理后再安装。"
         fi
 
         info "开始检查依赖、下载并安装..."

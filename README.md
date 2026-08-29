@@ -38,6 +38,14 @@ PASSWORD="$(openssl rand -base64 32)" && bash <(curl -fsSL https://raw.githubuse
 bash install.sh --help
 ```
 
+## 卸载
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --uninstall
+```
+
+`--uninstall` 无需交互确认。若检测到已安装（或存在残留文件），一键安装会被拒绝，请先执行上述卸载命令。
+
 ## 管理命令
 
 ```bash
@@ -47,7 +55,12 @@ journalctl -u ss-rust -n 50 --no-pager
 
 请放行实际使用的 TCP/UDP 端口。
 
-配置文件：`/etc/ss-rust/config.json`
+脚本的配置信息（含 SS 链接）输出到标准错误（stderr），重定向 stdout 不会影响显示。
+
+服务以系统 `nobody` 用户运行（systemd `User=nobody`），因此可监听普通端口；
+若需绑定 1024 以下端口，脚本已授予 `CAP_NET_BIND_SERVICE` 能力。
+
+配置文件：`/etc/ss-rust/config.json`（root 所有，644，含密码明文）
 
 程序文件：`/usr/local/bin/ss-rust`
 
