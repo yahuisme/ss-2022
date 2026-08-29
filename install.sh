@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.08.27"
+readonly SCRIPT_VERSION="26.08.29"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -695,7 +695,10 @@ install_flow() {
             generate_config
         fi
     fi
-    create_systemd_service
+    # 仅首次安装时创建服务并设为自启；更新/重装保留用户既有的 unit 与自启状态。
+    if [[ ! -f "$SYSTEMD_SERVICE_FILE" ]]; then
+        create_systemd_service
+    fi
     manage_service "restart"
     INSTALL_COMMITTED=true
 }
@@ -708,10 +711,21 @@ do_install() {
             info "安装已取消。"
             return
         fi
-        info "将覆盖现有安装..."
+        if [[ -f "$CONFIG_PATH" ]]; then
+            read -r -p "是否保留当前配置? (Y/n): " keep_choice < /dev/tty
+            if [[ "$keep_choice" =~ ^[Nn]$ ]]; then
+                info "将覆盖现有安装并重新配置..."
+                install_flow true
+            else
+                info "将重新安装并保留现有配置..."
+                install_flow false
+            fi
+        else
+            install_flow true
+        fi
+    else
+        install_flow true
     fi
-
-    install_flow true
 
     success "安装完成，shadowsocks-rust 已成功启动！"
     view_config
@@ -906,7 +920,7 @@ view_config() {
 
 main_menu() {
     while true; do
-        clear
+        clear >/dev/null 2>&1 || true
         printf '%b\n' "${C_GREEN}============================================================${C_RESET}"
         printf '%b\n' "  ${C_BLUE}Shadowsocks-rust 管理脚本 (v${SCRIPT_VERSION})${C_RESET}"
         
@@ -943,15 +957,17 @@ main_menu() {
         read -r -p "请输入您的选项 [0-9]: " choice < /dev/tty
 
         case "$choice" in
-            1) do_install ;;
-            2) do_update ;;
-            3) do_uninstall ;;
-            4) do_modify_config ;;
-            5) view_config ;;
-            6) manage_service "start" ;;
-            7) manage_service "stop" ;;
-            8) manage_service "restart" ;;
-            9) manage_service "status" ;;
+            # 菜单操作在子 shell 中执行：内部 error() 只终止本次操作，不退出整个脚本。
+            # 子 shell 失败退出码用 || true 吸收，避免 set -e 使菜单整体退出。
+            1) ( do_install ) || true ;;
+            2) ( do_update ) || true ;;
+            3) ( do_uninstall ) || true ;;
+            4) ( do_modify_config ) || true ;;
+            5) ( view_config ) || true ;;
+            6) ( manage_service "start" ) || true ;;
+            7) ( manage_service "stop" ) || true ;;
+            8) ( manage_service "restart" ) || true ;;
+            9) ( manage_service "status" ) || true ;;
             0) 
                 info "感谢使用！"
                 exit 0 
