@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.08.29"
+readonly SCRIPT_VERSION="26.08.30"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -108,7 +108,8 @@ on_exit() {
         warn "操作失败，正在恢复原有安装..."
         restore_install_state
     fi
-    cleanup
+    # 仅主 shell 退出时清理；菜单子 shell 退出不清理（TMP_DIR 跨菜单操作共享）
+    [[ $$ == "$BASHPID" ]] && cleanup
     return "$status"
 }
 
@@ -575,18 +576,25 @@ generate_config() {
         check_port_available "$port"
     fi
 
-    # 密码验证和输入
+    # 密码验证和输入（校验失败可重新输入，与端口输入一致）
     if [[ -z "$password" ]]; then
-        read -r -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input < /dev/tty
-        if [[ -z "$password_input" ]]; then
-            info "为 ${method} 生成 ${key_bytes} 字节随机密码..."
-            password=$(openssl rand -base64 "$key_bytes") || error "生成随机密码失败。"
-            success "已生成随机密码。"
-        else
-            password=$password_input
-        fi
+        while true; do
+            read -r -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input < /dev/tty
+            if [[ -z "$password_input" ]]; then
+                info "为 ${method} 生成 ${key_bytes} 字节随机密码..."
+                password=$(openssl rand -base64 "$key_bytes") || error "生成随机密码失败。"
+                success "已生成随机密码。"
+                break
+            fi
+            if ( validate_password "$password_input" "$key_bytes" ) 2>/dev/null; then
+                password="$password_input"
+                break
+            fi
+            warn "密码无效：必须是 ${key_bytes} 字节的规范 Base64 编码（可留空随机生成）。"
+        done
     else
         info "使用指定的密码。"
+        validate_password "$password" "$key_bytes"
     fi
     
     validate_config_values "$port" "$password" "$method"
@@ -1017,16 +1025,17 @@ main_menu() {
 
         case "$choice" in
             # 菜单操作在子 shell 中执行：内部 error() 只终止本次操作，不退出整个脚本。
+            # 子 shell 内显式设置 EXIT trap：操作失败(error/set -e)时同样触发回滚与状态恢复。
             # 子 shell 失败退出码用 || true 吸收，避免 set -e 使菜单整体退出。
-            1) ( do_install ) || true ;;
-            2) ( do_update ) || true ;;
-            3) ( do_uninstall ) || true ;;
-            4) ( do_modify_config ) || true ;;
-            5) ( view_config ) || true ;;
-            6) ( manage_service "start" ) || true ;;
-            7) ( manage_service "stop" ) || true ;;
-            8) ( manage_service "restart" ) || true ;;
-            9) ( manage_service "status" ) || true ;;
+            1) ( trap 'on_exit' EXIT; do_install ) || true ;;
+            2) ( trap 'on_exit' EXIT; do_update ) || true ;;
+            3) ( trap 'on_exit' EXIT; do_uninstall ) || true ;;
+            4) ( trap 'on_exit' EXIT; do_modify_config ) || true ;;
+            5) ( trap 'on_exit' EXIT; view_config ) || true ;;
+            6) ( trap 'on_exit' EXIT; manage_service "start" ) || true ;;
+            7) ( trap 'on_exit' EXIT; manage_service "stop" ) || true ;;
+            8) ( trap 'on_exit' EXIT; manage_service "restart" ) || true ;;
+            9) ( trap 'on_exit' EXIT; manage_service "status" ) || true ;;
             0) 
                 info "感谢使用！"
                 exit 0 
