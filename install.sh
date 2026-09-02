@@ -31,10 +31,12 @@ readonly SERVICE_START_ATTEMPTS=5
 
 # --- 颜色定义 ---
 readonly C_RESET=$'\033[0m'
-readonly C_RED=$'\033[0;31m'
-readonly C_GREEN=$'\033[0;32m'
-readonly C_YELLOW=$'\033[1;33m'
-readonly C_BLUE=$'\033[0;34m'
+readonly C_RED=$'\033[91m'
+readonly C_GREEN=$'\033[92m'
+readonly C_YELLOW=$'\033[93m'
+readonly C_BLUE=$'\033[94m'
+readonly C_CYAN=$'\033[96m'
+readonly C_MAGENTA=$'\033[95m'
 
 # --- 临时目录和失败恢复 ---
 TMP_DIR=""
@@ -141,7 +143,27 @@ backup_install_state() {
 info() { printf '%b[信息]%b %s\n' "$C_BLUE" "$C_RESET" "$1" >&2; }
 success() { printf '%b[成功]%b %s\n' "$C_GREEN" "$C_RESET" "$1" >&2; }
 warn() { printf '%b[警告]%b %s\n' "$C_YELLOW" "$C_RESET" "$1" >&2; }
-error() { printf '%b[错误]%b %s\n' "$C_RED" "$C_RESET" "$1" >&2; exit 1; }
+error() {
+    printf '%b[错误]%b %s\n' "$C_RED" "$C_RESET" "$1" >&2
+    # 根据错误内容提供简单建议
+    case "$1" in
+        *"网络"*|*"下载"*) printf '%b[提示]%b 检查网络连接或更换DNS\n' "$C_YELLOW" "$C_RESET" >&2 ;;
+        *"权限"*|*"root"*) printf '%b[提示]%b 请使用 sudo 运行脚本\n' "$C_YELLOW" "$C_RESET" >&2 ;;
+        *"端口"*) printf '%b[提示]%b 尝试使用其他端口号\n' "$C_YELLOW" "$C_RESET" >&2 ;;
+    esac
+    exit 1
+}
+
+# --- 界面助手 ---
+draw_divider() {
+    printf "%0.s─" {1..48}
+    printf "\n"
+}
+
+menu_item() { # <颜色> <编号> <说明>
+    local color="$1" num="$2" label="$3"
+    printf "  %b%-2s%b %-35s\n" "$color" "$num" "$C_RESET" "$label"
+}
 
 # --- 安全网络请求函数 ---
 readonly CURL_USER_AGENT="ss-rust-manager/$SCRIPT_VERSION"
@@ -395,7 +417,7 @@ check_dependencies() {
         if [[ "${non_interactive:-false}" == "true" ]]; then
             info "将在非交互模式下自动安装..."
         else
-            read -r -p "是否需要现在自动安装它们? (Y/n): " choice < /dev/tty
+            read -r -p " -> 是否需要现在自动安装它们? (Y/n): " choice < /dev/tty
             if [[ "$choice" =~ ^[Nn]$ ]]; then
                 error "缺少必要的依赖，脚本无法继续运行。"
             fi
@@ -557,7 +579,7 @@ generate_config() {
     local key_bytes
 
     if [[ -z "${3:-}" && -z "$port" ]]; then
-        read -r -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (默认: 1): " method_choice < /dev/tty
+        read -r -p " -> 加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (默认: 1): " method_choice < /dev/tty
         [[ "$method_choice" == "2" ]] && method="2022-blake3-chacha20-poly1305"
         [[ -z "$method_choice" || "$method_choice" == "1" || "$method_choice" == "2" ]] || error "无效的加密方式选项"
     fi
@@ -569,7 +591,7 @@ generate_config() {
     # 端口验证和输入
     if [[ -z "$port" ]]; then
         while true; do
-            read -r -p "请输入 Shadowsocks 端口 [${MIN_PORT}-${MAX_PORT}] (默认: ${DEFAULT_PORT}): " port < /dev/tty
+            read -r -p " -> 请输入端口 [${MIN_PORT}-${MAX_PORT}] (默认: ${C_CYAN}${DEFAULT_PORT}${C_RESET}): " port < /dev/tty
             port=${port:-$DEFAULT_PORT}
             if [[ "$port" =~ ^[1-9][0-9]*$ && "$port" -le $MAX_PORT ]]; then
                 if ( check_port_available "$port" 2>/dev/null ); then
@@ -589,7 +611,7 @@ generate_config() {
     # 密码验证和输入（校验失败可重新输入，与端口输入一致）
     if [[ -z "$password" ]]; then
         while true; do
-            read -r -p "请输入 Shadowsocks 密码 (留空则随机生成): " password_input < /dev/tty
+            read -r -p " -> 请输入密码 (留空则随机生成): " password_input < /dev/tty
             if [[ -z "$password_input" ]]; then
                 info "为 ${method} 生成 ${key_bytes} 字节随机密码..."
                 password=$(openssl rand -base64 "$key_bytes") || error "生成随机密码失败。"
@@ -785,13 +807,13 @@ install_flow() {
 do_install() {
     if [[ -f "$BINARY_PATH" ]]; then
         warn "检测到 shadowsocks-rust 已安装。"
-        read -r -p "是否要重新安装? (y/N): " choice < /dev/tty
+        read -r -p " -> 是否要重新安装? (y/N): " choice < /dev/tty
         if [[ ! "$choice" =~ ^[Yy]$ ]]; then
             info "安装已取消。"
             return
         fi
         if [[ -f "$CONFIG_PATH" ]]; then
-            read -r -p "是否保留当前配置? (Y/n): " keep_choice < /dev/tty
+            read -r -p " -> 是否保留当前配置? (Y/n): " keep_choice < /dev/tty
             if [[ "$keep_choice" =~ ^[Nn]$ ]]; then
                 info "将覆盖现有安装并重新配置..."
                 install_flow true
@@ -841,7 +863,7 @@ do_uninstall() {
         return
     fi
 
-    read -r -p "您确定要完全卸载 shadowsocks-rust 吗? (Y/n): " choice < /dev/tty
+    read -r -p " -> 您确定要完全卸载 shadowsocks-rust 吗? (Y/n): " choice < /dev/tty
     if [[ "$choice" =~ ^[Nn]$ ]]; then
         info "已取消卸载操作。"
         return
@@ -873,7 +895,7 @@ do_modify_config() {
 
     local new_method method_choice
     while true; do
-        read -r -p "加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (当前: ${current_method}, 回车保留): " method_choice < /dev/tty
+        read -r -p " -> 加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (当前: ${current_method}, 回车保留): " method_choice < /dev/tty
         if [[ -z "$method_choice" ]]; then
             new_method="$current_method"
             break
@@ -891,7 +913,7 @@ do_modify_config() {
 
     # 端口输入和验证
     while true; do
-        read -r -p "新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${current_port}): " new_port < /dev/tty
+        read -r -p " -> 新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${C_CYAN}${current_port}${C_RESET}): " new_port < /dev/tty
         new_port=${new_port:-$current_port}
         if [[ "$new_port" =~ ^[1-9][0-9]*$ && "$new_port" -le $MAX_PORT ]]; then
             if [[ "$new_port" != "$current_port" ]]; then
@@ -904,7 +926,7 @@ do_modify_config() {
     done
 
     # 密码输入和验证
-    read -r -p "新密码 (当前: ${current_password}, 留空保留; 切换加密方式时留空将重新生成, 输入 'random' 生成新的): " new_password_input < /dev/tty
+    read -r -p " -> 新密码 (当前: ${current_password}, 留空保留; 切换加密方式时留空将重新生成, 输入 'random' 生成新的): " new_password_input < /dev/tty
     if [[ -z "$new_password_input" ]]; then
         if [[ "$new_method" != "$current_method" ]]; then
             info "加密方式已更改，正在生成符合新加密方式的随机密码..."
@@ -982,9 +1004,9 @@ view_config() {
 
     {
         echo ""
-        printf '%b\n' "${C_GREEN}======================================${C_RESET}"
-        printf '%b\n' "  ${C_BLUE}Shadowsocks-2022 配置信息${C_RESET}"
-        printf '%b\n' "${C_GREEN}======================================${C_RESET}"
+        printf '%b\n' "${C_CYAN}────────────────────────────────────────${C_RESET}"
+        printf '%b\n' "  ${C_CYAN}Shadowsocks-2022 配置信息${C_RESET}"
+        printf '%b\n' "${C_CYAN}────────────────────────────────────────${C_RESET}"
         printf '%b\n' "  ${C_YELLOW}节点名称:${C_RESET}       ${node_name}"
         if [[ -n "$ip_address" ]]; then
             printf '%b\n' "  ${C_YELLOW}服务器地址:${C_RESET}     ${ip_address}"
@@ -994,7 +1016,7 @@ view_config() {
         printf '%b\n' "  ${C_YELLOW}端口:${C_RESET}           ${port}"
         printf '%b\n' "  ${C_YELLOW}密码:${C_RESET}           ${password}"
         printf '%b\n' "  ${C_YELLOW}加密方式:${C_RESET}       ${method}"
-        printf '%b\n' "${C_GREEN}======================================${C_RESET}"
+        printf '%b\n' "${C_CYAN}────────────────────────────────────────${C_RESET}"
         echo ""
         if [[ -n "$ip_address" ]]; then
             ss_link=$(generate_ss_url "$ip_address" "$port" "$password" "$method" "$node_name")
@@ -1005,16 +1027,17 @@ view_config() {
         fi
         echo ""
         printf '%b\n' "  ${C_BLUE}提示:${C_RESET} 复制上面的SS链接导入到客户端即可使用"
-        printf '%b\n' "${C_GREEN}======================================${C_RESET}"
+        printf '%b\n' "${C_CYAN}────────────────────────────────────────${C_RESET}"
     } >&2
 }
 
 main_menu() {
     while true; do
         clear >/dev/null 2>&1 || true
-        printf '%b\n' "${C_GREEN}============================================================${C_RESET}"
-        printf '%b\n' "  ${C_BLUE}Shadowsocks-rust 管理脚本 (v${SCRIPT_VERSION})${C_RESET}"
-        
+        printf '%b\n' "${C_CYAN} Shadowsocks-rust 管理脚本${C_RESET}"
+        printf '%b\n' "${C_YELLOW} Version: v${SCRIPT_VERSION}${C_RESET}"
+        draw_divider
+
         local status_info
         if [[ -f "$VERSION_FILE" ]]; then
             local version="v$(cat "$VERSION_FILE")"
@@ -1026,24 +1049,23 @@ main_menu() {
         else
             status_info="${C_RED}未安装${C_RESET}"
         fi
-        printf '%b\n' "  当前状态: ${status_info}"
-        
-        printf '%b\n' "${C_GREEN}============================================================${C_RESET}"
-        echo ""
-        printf '%b\n' "  ${C_YELLOW}1.${C_RESET} 安装 Shadowsocks-rust"
-        printf '%b\n' "  ${C_YELLOW}2.${C_RESET} 更新 Shadowsocks-rust"
-        printf '%b\n' "  ${C_YELLOW}3.${C_RESET} 卸载 Shadowsocks-rust"
-        echo "  ------------------------------------"
-        printf '%b\n' "  ${C_YELLOW}4.${C_RESET} 修改配置 (加密方式/端口/密码)"
-        printf '%b\n' "  ${C_YELLOW}5.${C_RESET} 查看配置信息"
-        echo "  ------------------------------------"
-        printf '%b\n' "  ${C_YELLOW}6.${C_RESET} 启动服务"
-        printf '%b\n' "  ${C_YELLOW}7.${C_RESET} 停止服务"
-        printf '%b\n' "  ${C_YELLOW}8.${C_RESET} 重启服务"
-        printf '%b\n' "  ${C_YELLOW}9.${C_RESET} 查看服务状态"
-        echo "  ------------------------------------"
-        printf '%b\n' "  ${C_YELLOW}0.${C_RESET} 退出脚本"
-        echo ""
+        printf '%b\n' "  状态: ${status_info}"
+        draw_divider
+
+        menu_item "$C_GREEN" "1." "安装 Shadowsocks-rust"
+        menu_item "$C_CYAN" "2." "更新 Shadowsocks-rust"
+        menu_item "$C_RED" "3." "卸载 Shadowsocks-rust"
+        draw_divider
+        menu_item "$C_YELLOW" "4." "修改配置 (加密方式/端口/密码)"
+        menu_item "$C_CYAN" "5." "查看配置信息"
+        draw_divider
+        menu_item "$C_CYAN" "6." "启动服务"
+        menu_item "$C_RED" "7." "停止服务"
+        menu_item "$C_CYAN" "8." "重启服务"
+        menu_item "$C_MAGENTA" "9." "查看服务状态"
+        draw_divider
+        menu_item "$C_YELLOW" "0." "退出脚本"
+        draw_divider
 
         read -r -p "请输入您的选项 [0-9]: " choice < /dev/tty || { info "输入终止，退出脚本。"; exit 0; }
 
