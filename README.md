@@ -3,7 +3,7 @@
 Shadowsocks 2022 一键安装与管理脚本，基于
 [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust)。
 
-当前版本：`v26.08.30`
+当前版本：`v26.09.02`
 
 支持 Debian、Ubuntu、CentOS，以及 x86_64、aarch64、armv7l：
 

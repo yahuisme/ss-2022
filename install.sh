@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.08.30"
+readonly SCRIPT_VERSION="26.09.02"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -198,16 +198,22 @@ check_tty() {
 # --- 端口可用性检查 ---
 check_port_available() {
     local port="$1"
-    
+    local port_in_use=false
+
     if command -v ss >/dev/null 2>&1; then
         if ss -H -ltn "sport = :$port" 2>/dev/null | grep -q . || \
            ss -H -lun "sport = :$port" 2>/dev/null | grep -q .; then
-            error "端口 ${port} 已被占用，请选择其他端口。"
+            port_in_use=true
         fi
-    elif command -v netstat >/dev/null 2>&1; then
+    fi
+    # ss 不可用或版本过旧（iproute2 < 4.9 无 -H，调用失败）时回退 netstat，避免静默跳过检查
+    if [[ "$port_in_use" == false ]] && command -v netstat >/dev/null 2>&1; then
         if netstat -tuln 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" || $4 ~ p" " {found=1} END {exit !found}'; then
-            error "端口 ${port} 已被占用，请选择其他端口。"
+            port_in_use=true
         fi
+    fi
+    if [[ "$port_in_use" == true ]]; then
+        error "端口 ${port} 已被占用，请选择其他端口。"
     fi
 }
 
@@ -269,12 +275,13 @@ validate_config_values() {
     validate_password "$password" "$key_bytes"
 }
 
-# 宽松校验：用于读取/更新既有配置，不强制规范 Base64（shadowsocks-rust 运行时接受非规范 key），
+# 宽松校验：用于读取/更新既有配置，不强制规范 Base64（shadowsocks-rust 运行时接受无填充 key），
 # 避免用户手动修改过的合法配置阻断更新、修改或查看。
 validate_existing_password() {
     local password="$1" key_bytes="$2"
 
-    # 仅检查字符集与解码长度；不要求 4 的倍数长度（无 padding 的 base64url 合法）
+    # 仅检查字符集与解码长度；不要求 4 的倍数长度（无 padding 的标准 base64 合法；
+    # base64url 字符 -_ 非法，上游 STANDARD 字母表与下方正则均拒绝）
     if [[ ! "$password" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
         error "配置中的密码不是有效的 Base64 字符串，请使用选项 4 重新设置密码。"
     fi
@@ -297,7 +304,10 @@ get_public_ip() {
     # 优先使用缓存的公网地址，避免每次查看配置都发起网络请求
     local cached_ip=""
     if [[ -f "${INSTALL_DIR}/.public-ip" ]]; then
-        cached_ip=$(<"${INSTALL_DIR}/.public-ip")
+        # 缓存超过 1 天则刷新，避免 VPS 公网 IP 变更后长期显示旧地址
+        if [[ -z "$(find "${INSTALL_DIR}/.public-ip" -mmin +1440 2>/dev/null)" ]]; then
+            cached_ip=$(<"${INSTALL_DIR}/.public-ip")
+        fi
     fi
     if [[ -n "$cached_ip" ]]; then
         echo "$cached_ip"
@@ -733,6 +743,12 @@ install_flow() {
     check_dependencies "$os_type"
     arch=$(detect_arch)
     backup_install_state
+    # 残留处理：unit 存在但程序不存在（中断的卸载/手动删除残留）→ 移除旧 unit，让下方重建正式服务
+    if [[ -f "$SYSTEMD_SERVICE_FILE" && ! -f "$BINARY_PATH" ]]; then
+        warn "检测到残留的 systemd 服务文件（程序不存在），正在移除并重新创建服务..."
+        rm -f "$SYSTEMD_SERVICE_FILE"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
     if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then
         if systemctl is-active --quiet ss-rust 2>/dev/null; then
             info "正在暂时停止旧服务，以安全替换程序..."
@@ -799,11 +815,12 @@ do_update() {
         error "shadowsocks-rust 未安装。请先执行安装。"
     fi
 
-    local current_version latest_version
+    local current_version latest_version config_line
     [[ -s "$VERSION_FILE" ]] || error "版本文件缺失或为空，无法执行更新。"
     current_version=$(<"$VERSION_FILE")
     validate_version "$current_version"
-    IFS=$'\t' read -r current_port current_password current_method < <(load_config)
+    config_line=$(load_config) || return 1
+    IFS=$'\t' read -r current_port current_password current_method <<< "$config_line"
     validate_existing_config_values "$current_port" "$current_password" "$current_method"
     latest_version=$(get_latest_version)
 
@@ -841,8 +858,9 @@ load_config() {
 
 do_modify_config() {
     info "加载当前配置..."
-    local current_port current_password current_method key_bytes new_port new_password
-    IFS=$'\t' read -r current_port current_password current_method < <(load_config)
+    local current_port current_password current_method key_bytes new_port new_password config_line
+    config_line=$(load_config) || return 1
+    IFS=$'\t' read -r current_port current_password current_method <<< "$config_line"
     validate_existing_config_values "$current_port" "$current_password" "$current_method"
     key_bytes=$(get_key_bytes "$current_method")
 
@@ -903,7 +921,12 @@ do_modify_config() {
         new_password=$new_password_input
     fi
 
-    validate_config_values "$new_port" "$new_password" "$new_method"
+    # 密码未变时沿用宽松校验：无填充等 ss-rust 运行时接受的合法 key 不应阻断仅改端口/方法
+    if [[ "$new_password" == "$current_password" ]]; then
+        validate_existing_config_values "$new_port" "$new_password" "$new_method"
+    else
+        validate_config_values "$new_port" "$new_password" "$new_method"
+    fi
 
     # 检查是否有变化
     if [[ "$new_port" == "$current_port" && "$new_password" == "$current_password" && "$new_method" == "$current_method" ]]; then
@@ -946,8 +969,9 @@ generate_ss_url() {
 # shellcheck disable=SC2120
 view_config() {
     local ip_address="${1:-}"
-    local port password method node_name ss_link
-    IFS=$'\t' read -r port password method < <(load_config)
+    local port password method node_name ss_link config_line
+    config_line=$(load_config) || return 1
+    IFS=$'\t' read -r port password method <<< "$config_line"
     validate_existing_config_values "$port" "$password" "$method"
     node_name="$(hostname)-ss2022"
 
