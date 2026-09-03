@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.09.03"
+readonly SCRIPT_VERSION="26.09.04"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -144,14 +144,16 @@ info() { printf '%b[信息]%b %s\n' "$C_BLUE" "$C_RESET" "$1" >&2; }
 success() { printf '%b[成功]%b %s\n' "$C_GREEN" "$C_RESET" "$1" >&2; }
 warn() { printf '%b[警告]%b %s\n' "$C_YELLOW" "$C_RESET" "$1" >&2; }
 error() {
-    printf '%b[错误]%b %s\n' "$C_RED" "$C_RESET" "$1" >&2
+    local msg="$1"
+    local code="${2:-1}"
+    printf '%b[错误]%b %s\n' "$C_RED" "$C_RESET" "$msg" >&2
     # 根据错误内容提供简单建议
-    case "$1" in
+    case "$msg" in
         *"网络"*|*"下载"*) printf '%b[提示]%b 检查网络连接或更换DNS\n' "$C_YELLOW" "$C_RESET" >&2 ;;
         *"权限"*|*"root"*) printf '%b[提示]%b 请使用 sudo 运行脚本\n' "$C_YELLOW" "$C_RESET" >&2 ;;
         *"端口"*) printf '%b[提示]%b 尝试使用其他端口号\n' "$C_YELLOW" "$C_RESET" >&2 ;;
     esac
-    exit 1
+    exit "$code"
 }
 
 # --- 界面助手 ---
@@ -200,7 +202,7 @@ decode_base64() {
 
 # --- 基础检查函数 ---
 check_root() {
-    if [[ "$EUID" -ne 0 && "${1:-}" != "-h" && "${1:-}" != "--help" ]]; then
+    if [[ "$EUID" -ne 0 ]]; then
         error "此脚本必须以 root 权限运行，请使用 sudo。"
     fi
 }
@@ -449,8 +451,8 @@ install_dependencies() {
     case "$os_type" in
         ubuntu|debian)
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -y
-            apt-get install -y "${packages[@]}"
+            apt-get -o DPkg::Lock::Timeout=600 update -y
+            apt-get -o DPkg::Lock::Timeout=600 install -y "${packages[@]}"
             ;;
         centos)
             yum install -y epel-release &>/dev/null || true
@@ -915,8 +917,9 @@ do_modify_config() {
         read -r -p " -> 新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${C_CYAN}${current_port}${C_RESET}): " new_port < /dev/tty
         new_port=${new_port:-$current_port}
         if [[ "$new_port" =~ ^[1-9][0-9]*$ && "$new_port" -le $MAX_PORT ]]; then
-            if [[ "$new_port" != "$current_port" ]]; then
-                check_port_available "$new_port"
+            if [[ "$new_port" != "$current_port" ]] && ! ( check_port_available "$new_port" 2>/dev/null ); then
+                warn "端口 ${new_port} 已被占用，请换一个端口。"
+                continue
             fi
             break
         else
@@ -1097,44 +1100,14 @@ main_menu() {
 
 # --- 脚本入口 ---
 main() {
-    check_root "${1:-}"
-
-    local ss_port=""
-    local ss_password=""
-    local ss_method="$DEFAULT_ENCRYPTION_METHOD"
-
-    # 参数解析
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -p|--port)
-                if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
-                    error "参数 $1 需要指定端口号"
-                fi
-                ss_port="$2"
-                shift 2
-                ;;
-            -w|--password)
-                if [[ -z "${2:-}" || "${2:-}" =~ ^- ]]; then
-                    error "参数 $1 需要指定密码"
-                fi
-                ss_password="$2"
-                shift 2
-                ;;
-            -m|--method)
-                if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
-                    error "参数 $1 需要指定加密方式"
-                fi
-                get_key_bytes "$2" >/dev/null
-                ss_method="$2"
-                shift 2
-                ;;
-            -u|--uninstall)
-                init_temp_dir
-                run_uninstall_logic
-                exit 0
-                ;;
-            -h|--help)
-                cat << EOF
+    # 优先检查并响应帮助选项，普通用户查阅说明不应被 root 权限拦截
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
+            if [[ $# -ne 1 ]]; then
+                error "选项 $arg 不接受多余参数" 2
+            fi
+            cat << EOF
 Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
 
 用法:
@@ -1150,17 +1123,58 @@ Shadowsocks-rust 管理脚本 v${SCRIPT_VERSION}
 示例:
   # 交互式安装
   $0
-  
+
   # 一键安装 (指定端口和随机密码，默认 AES-128-GCM)
   $0 --port 8388 --password \$(openssl rand -base64 16)
 
   # 使用 ChaCha20-Poly1305
   $0 --port 8388 --password \$(openssl rand -base64 32) --method 2022-blake3-chacha20-poly1305
 EOF
+            exit 0
+        fi
+    done
+
+    check_root
+
+    local ss_port=""
+    local ss_password=""
+    local ss_method="$DEFAULT_ENCRYPTION_METHOD"
+
+    # 参数解析
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p|--port)
+                if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
+                    error "参数 $1 需要指定端口号" 2
+                fi
+                ss_port="$2"
+                shift 2
+                ;;
+            -w|--password)
+                if [[ -z "${2:-}" || "${2:-}" =~ ^- ]]; then
+                    error "参数 $1 需要指定密码" 2
+                fi
+                ss_password="$2"
+                shift 2
+                ;;
+            -m|--method)
+                if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
+                    error "参数 $1 需要指定加密方式" 2
+                fi
+                get_key_bytes "$2" >/dev/null
+                ss_method="$2"
+                shift 2
+                ;;
+            -u|--uninstall)
+                if [[ $# -ne 1 ]]; then
+                    error "选项 $1 不接受多余参数" 2
+                fi
+                init_temp_dir
+                run_uninstall_logic
                 exit 0
                 ;;
             *)
-                error "未知参数: $1. 使用 -h 或 --help 查看帮助信息。"
+                error "未知参数: $1. 使用 -h 或 --help 查看帮助信息。" 2
                 ;;
         esac
     done
