@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.09.02"
+readonly SCRIPT_VERSION="26.09.03"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -156,8 +156,7 @@ error() {
 
 # --- 界面助手 ---
 draw_divider() {
-    printf "%0.s─" {1..48}
-    printf "\n"
+    printf '%s\n' "────────────────────────────────────────────────"
 }
 
 menu_item() { # <颜色> <编号> <说明>
@@ -1004,9 +1003,9 @@ view_config() {
 
     {
         echo ""
-        printf '%b\n' "${C_CYAN}────────────────────────────────────────${C_RESET}"
+        draw_divider
         printf '%b\n' "  ${C_CYAN}Shadowsocks-2022 配置信息${C_RESET}"
-        printf '%b\n' "${C_CYAN}────────────────────────────────────────${C_RESET}"
+        draw_divider
         printf '%b\n' "  ${C_YELLOW}节点名称:${C_RESET}       ${node_name}"
         if [[ -n "$ip_address" ]]; then
             printf '%b\n' "  ${C_YELLOW}服务器地址:${C_RESET}     ${ip_address}"
@@ -1016,7 +1015,7 @@ view_config() {
         printf '%b\n' "  ${C_YELLOW}端口:${C_RESET}           ${port}"
         printf '%b\n' "  ${C_YELLOW}密码:${C_RESET}           ${password}"
         printf '%b\n' "  ${C_YELLOW}加密方式:${C_RESET}       ${method}"
-        printf '%b\n' "${C_CYAN}────────────────────────────────────────${C_RESET}"
+        draw_divider
         echo ""
         if [[ -n "$ip_address" ]]; then
             ss_link=$(generate_ss_url "$ip_address" "$port" "$password" "$method" "$node_name")
@@ -1027,7 +1026,7 @@ view_config() {
         fi
         echo ""
         printf '%b\n' "  ${C_BLUE}提示:${C_RESET} 复制上面的SS链接导入到客户端即可使用"
-        printf '%b\n' "${C_CYAN}────────────────────────────────────────${C_RESET}"
+        draw_divider
     } >&2
 }
 
