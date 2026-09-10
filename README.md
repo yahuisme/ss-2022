@@ -3,7 +3,7 @@
 Shadowsocks 2022 一键安装与管理脚本，基于
 [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust)。
 
-当前版本：`v26.09.04`
+当前版本：`v26.09.10`
 
 支持 Debian、Ubuntu、CentOS，以及 x86_64、aarch64、armv7l：
 
@@ -18,7 +18,7 @@ Shadowsocks 2022 一键安装与管理脚本，基于
 bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh)
 ```
 
-选择 `1` 开始安装。不带参数运行脚本可进入管理菜单。
+选择 `1` 开始安装。不带参数进入 36 列管理菜单；交互输入从 `/dev/tty` 读取，需要控制终端。无 TTY 请提供完整安装参数；输入结束会中止当前操作。
 
 ## 无交互安装
 
@@ -44,7 +44,7 @@ bash install.sh --help
 bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --uninstall
 ```
 
-`--uninstall` 无需交互确认。若检测到已安装（或存在残留文件），一键安装会被拒绝，请先执行上述卸载命令。
+`--uninstall` 无需交互确认，必须单独使用；`--help` 同样不得混用其他参数，且无需 root。参数组合错误返回 2。卸载后可返回菜单继续安装；不会批量删除其他会话或失败回滚的临时恢复目录。若检测到已安装（或存在残留文件），一键安装会被拒绝，请先执行上述卸载命令。
 
 ## 管理命令
 
@@ -55,7 +55,11 @@ journalctl -u ss-rust -n 50 --no-pager
 
 请放行实际使用的 TCP/UDP 端口。
 
-脚本的配置信息（含 SS 链接）输出到标准错误（stderr），重定向 stdout 不会影响显示。
+菜单输出到 stdout，日志和配置信息（含密钥及 SS 链接）输出到 stderr；重定向 stdout 不会隐藏密钥。颜色按实际输出目标判断：非 TTY、设置 `NO_COLOR`（含空值）或 `TERM=dumb` 时不输出 ANSI 颜色。密钥输入不回显，修改提示不重复展示原密钥。
+
+更新、重装和修改配置保留已有服务的启停及自启状态；原来停止的服务不会自动启动。修改配置仅替换 `server_port`、`password`、`method`，保留 `server`、`mode`、`nameserver`、`acl` 等自定义字段；非法 JSON 会被拒绝。
+
+关键步骤失败会中止当前操作并尝试回滚，菜单仍可继续使用。回滚不完整时会明确报告恢复目录（`/tmp/ss-rust.*`，可能含密钥），保留材料并阻止同一会话覆盖备份；请先按其中的 `old-*` 文件和 `was-*` 状态手动恢复，再删除该目录。脚本不会自动清理这类材料。
 
 服务以系统 `nobody` 用户运行（systemd `User=nobody`），因此可监听普通端口；
 若需绑定 1024 以下端口，脚本已授予 `CAP_NET_BIND_SERVICE` 能力。

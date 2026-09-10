@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.09.04"
+readonly SCRIPT_VERSION="26.09.10"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -47,18 +47,18 @@ init_temp_dir() {
 }
 
 cleanup() {
-    if [[ -d "$TMP_DIR" ]]; then
-        rm -rf "$TMP_DIR"
+    if [[ -f "${TMP_DIR}/KEEP" ]]; then
+        warn "恢复材料保留在: $TMP_DIR"
+    elif [[ -d "$TMP_DIR" ]]; then
+        rm -rf "$TMP_DIR" || warn "无法清理临时目录: $TMP_DIR"
     fi
 }
 
 cleanup_uninstall_residue() {
     # 清理中断操作可能留下的临时目录、原子替换文件和 systemd drop-in。
-    find /tmp -maxdepth 1 -type d -user root -name 'ss-rust.*' -exec rm -rf -- {} + 2>/dev/null || true
-    find /usr/local/bin -maxdepth 1 -type f -user root -name 'ss-rust.new.*' -delete 2>/dev/null || true
-    find /etc/ss-rust -maxdepth 1 -type f -user root \
-        \( -name 'config.json.tmp.*' -o -name 'ver.txt.new.*' \) -delete 2>/dev/null || true
-    rm -rf /etc/systemd/system/ss-rust.service.d /run/ss-rust
+    # 不删除其他会话或回滚失败留下的恢复目录。
+    find /usr/local/bin -maxdepth 1 -type f -user root -name 'ss-rust.new.*' -delete || return 1
+    rm -rf /etc/systemd/system/ss-rust.service.d /run/ss-rust || return 1
 }
 
 BACKUP_ACTIVE=false
@@ -66,49 +66,56 @@ INSTALL_COMMITTED=false
 
 restore_install_state() {
     [[ "$BACKUP_ACTIVE" == true ]] || return 0
-
-    if [[ -f "${TMP_DIR}/old-binary" ]]; then
-        install -m 755 "${TMP_DIR}/old-binary" "$BINARY_PATH" 2>/dev/null || true
-    else
-        rm -f "$BINARY_PATH" 2>/dev/null || true
+    local failed=false name target mode
+    # 首次安装失败：先停止并禁用新服务，避免删除 unit 后遗留运行进程。
+    if [[ ! -f "${TMP_DIR}/old-service" && -f "$SYSTEMD_SERVICE_FILE" ]]; then
+        if ! systemctl stop ss-rust || ! systemctl disable ss-rust; then
+            warn "无法停止或禁用新服务，请手动恢复: $TMP_DIR"
+            return 1
+        fi
     fi
-    if [[ -f "${TMP_DIR}/old-version" ]]; then
-        install -m 644 "${TMP_DIR}/old-version" "$VERSION_FILE" 2>/dev/null || true
-    else
-        rm -f "$VERSION_FILE" 2>/dev/null || true
-    fi
-    if [[ -f "${TMP_DIR}/old-config" ]]; then
-        install -m 644 "${TMP_DIR}/old-config" "$CONFIG_PATH" 2>/dev/null || true
-    else
-        rm -f "$CONFIG_PATH" 2>/dev/null || true
-    fi
-    if [[ -f "${TMP_DIR}/old-service" ]]; then
-        install -m 644 "${TMP_DIR}/old-service" "$SYSTEMD_SERVICE_FILE" 2>/dev/null || true
-    else
-        rm -f "$SYSTEMD_SERVICE_FILE" 2>/dev/null || true
-    fi
+    for name in binary version config service; do
+        case "$name" in
+            binary) target="$BINARY_PATH"; mode=755 ;;
+            version) target="$VERSION_FILE"; mode=644 ;;
+            config) target="$CONFIG_PATH"; mode=644 ;;
+            service) target="$SYSTEMD_SERVICE_FILE"; mode=644 ;;
+        esac
+        if [[ -f "${TMP_DIR}/old-$name" ]]; then
+            install -m "$mode" "${TMP_DIR}/old-$name" "$target" || failed=true
+        else
+            rm -f "$target" || failed=true
+        fi
+    done
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl daemon-reload || failed=true
         if [[ -f "${TMP_DIR}/was-enabled" ]]; then
-            systemctl enable ss-rust >/dev/null 2>&1 || warn "无法恢复服务开机自启状态。"
+            systemctl enable ss-rust || failed=true
         elif [[ -f "${TMP_DIR}/was-disabled" ]]; then
-            systemctl disable ss-rust >/dev/null 2>&1 || warn "无法恢复服务禁用状态。"
+            systemctl disable ss-rust || failed=true
         fi
-        if [[ -f "${TMP_DIR}/old-service" && -f "${TMP_DIR}/was-active" ]]; then
-            systemctl restart ss-rust >/dev/null 2>&1 || true
-        elif [[ -f "${TMP_DIR}/old-service" ]]; then
-            systemctl stop ss-rust >/dev/null 2>&1 || true
+        if [[ -f "${TMP_DIR}/old-service" ]]; then
+            if [[ -f "${TMP_DIR}/was-active" ]]; then
+                systemctl restart ss-rust && systemctl is-active --quiet ss-rust || failed=true
+            else
+                systemctl stop ss-rust || failed=true
+            fi
         fi
     fi
-    # 清理原子替换可能残留的临时文件
-    rm -f "${BINARY_PATH}.new."* "${VERSION_FILE}.new."* "${CONFIG_PATH}.tmp."* 2>/dev/null || true
+    if [[ "$failed" == true ]]; then
+        warn "回滚未完成，请手动恢复: $TMP_DIR"
+        return 1
+    fi
 }
 
 on_exit() {
     local status=$?
     if [[ $status -ne 0 && "$BACKUP_ACTIVE" == true && "$INSTALL_COMMITTED" != true ]]; then
         warn "操作失败，正在恢复原有安装..."
-        restore_install_state
+        : > "${TMP_DIR}/KEEP" || { warn "无法标记恢复材料: $TMP_DIR"; return 1; }
+        if restore_install_state; then
+            rm -f "${TMP_DIR}/KEEP" || return 1
+        fi
     fi
     # 仅主 shell 退出时清理；菜单子 shell 退出不清理（TMP_DIR 跨菜单操作共享）
     [[ $$ == "$BASHPID" ]] && cleanup
@@ -122,36 +129,63 @@ trap 'exit 143' TERM
 backup_install_state() {
     INSTALL_COMMITTED=false
     BACKUP_ACTIVE=false
+    if [[ -f "${TMP_DIR}/KEEP" ]]; then
+        error "有未恢复的备份，请先处理: $TMP_DIR"
+    fi
+    mkdir -p "$TMP_DIR" || error "创建临时目录失败。"
+    rm -f "${TMP_DIR}/old-"{binary,version,config,service} "${TMP_DIR}/was-"{active,enabled,disabled} || error "清理旧快照失败。"
     if [[ -f "$BINARY_PATH" ]]; then cp -p "$BINARY_PATH" "${TMP_DIR}/old-binary" || error "备份旧程序失败，已中止操作。"; fi
     if [[ -f "$VERSION_FILE" ]]; then cp -p "$VERSION_FILE" "${TMP_DIR}/old-version" || error "备份版本文件失败，已中止操作。"; fi
     if [[ -f "$CONFIG_PATH" ]]; then cp -p "$CONFIG_PATH" "${TMP_DIR}/old-config" || error "备份配置文件失败，已中止操作。"; fi
     if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then cp -p "$SYSTEMD_SERVICE_FILE" "${TMP_DIR}/old-service" || error "备份服务文件失败，已中止操作。"; fi
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet ss-rust 2>/dev/null; then
-        : > "${TMP_DIR}/was-active"
+        : > "${TMP_DIR}/was-active" || error "保存服务状态失败。"
     fi
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl is-enabled --quiet ss-rust 2>/dev/null; then
-            : > "${TMP_DIR}/was-enabled"
+            : > "${TMP_DIR}/was-enabled" || error "保存服务状态失败。"
         else
-            : > "${TMP_DIR}/was-disabled"
+            : > "${TMP_DIR}/was-disabled" || error "保存服务状态失败。"
         fi
     fi
     BACKUP_ACTIVE=true
 }
 
+# 按实际输出 fd 判断：重定向到 stderr 后，fd 1 即 stderr 的目标。
+# shellcheck disable=SC2059 # printf 包装器，格式串均来自脚本常量
+cprintf() {
+    local arg
+    local -a args=()
+    if [[ -t 1 && -z "${NO_COLOR+x}" && "${TERM:-dumb}" != dumb ]]; then
+        printf "$@"
+    else
+        for arg in "$@"; do
+            arg=${arg//${C_RESET}/}
+            arg=${arg//${C_RED}/}
+            arg=${arg//${C_GREEN}/}
+            arg=${arg//${C_YELLOW}/}
+            arg=${arg//${C_BLUE}/}
+            arg=${arg//${C_CYAN}/}
+            arg=${arg//${C_MAGENTA}/}
+            args+=("$arg")
+        done
+        printf "${args[@]}"
+    fi
+}
+
 # --- 日志函数 ---
-info() { printf '%b[信息]%b %s\n' "$C_BLUE" "$C_RESET" "$1" >&2; }
-success() { printf '%b[成功]%b %s\n' "$C_GREEN" "$C_RESET" "$1" >&2; }
-warn() { printf '%b[警告]%b %s\n' "$C_YELLOW" "$C_RESET" "$1" >&2; }
+info() { cprintf '%b[信息]%b %s\n' "$C_BLUE" "$C_RESET" "$1" >&2; }
+success() { cprintf '%b[成功]%b %s\n' "$C_GREEN" "$C_RESET" "$1" >&2; }
+warn() { cprintf '%b[警告]%b %s\n' "$C_YELLOW" "$C_RESET" "$1" >&2; }
 error() {
     local msg="$1"
     local code="${2:-1}"
-    printf '%b[错误]%b %s\n' "$C_RED" "$C_RESET" "$msg" >&2
+    cprintf '%b[错误]%b %s\n' "$C_RED" "$C_RESET" "$msg" >&2
     # 根据错误内容提供简单建议
     case "$msg" in
-        *"网络"*|*"下载"*) printf '%b[提示]%b 检查网络连接或更换DNS\n' "$C_YELLOW" "$C_RESET" >&2 ;;
-        *"权限"*|*"root"*) printf '%b[提示]%b 请使用 sudo 运行脚本\n' "$C_YELLOW" "$C_RESET" >&2 ;;
-        *"端口"*) printf '%b[提示]%b 尝试使用其他端口号\n' "$C_YELLOW" "$C_RESET" >&2 ;;
+        *"网络"*|*"下载"*) cprintf '%b[提示]%b 检查网络连接或更换DNS\n' "$C_YELLOW" "$C_RESET" >&2 ;;
+        *"权限"*|*"root"*) cprintf '%b[提示]%b 请使用 sudo 运行脚本\n' "$C_YELLOW" "$C_RESET" >&2 ;;
+        *"端口"*) cprintf '%b[提示]%b 尝试使用其他端口号\n' "$C_YELLOW" "$C_RESET" >&2 ;;
     esac
     exit "$code"
 }
@@ -163,7 +197,7 @@ draw_divider() {
 
 menu_item() { # <颜色> <编号> <说明>
     local color="$1" num="$2" label="$3"
-    printf "  %b%-2s%b %-35s\n" "$color" "$num" "$C_RESET" "$label"
+    cprintf "  %b%-2s%b %s\n" "$color" "$num" "$C_RESET" "$label"
 }
 
 # --- 安全网络请求函数 ---
@@ -243,7 +277,7 @@ check_port_available() {
 validate_port() {
     local port="$1"
     # 拒绝前导 0 与 0 本身：避免 bash 八进制解析歧义，且端口应无前导零
-    [[ "$port" =~ ^[1-9][0-9]*$ && "$port" -le "$MAX_PORT" ]] ||
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ && "$port" -le "$MAX_PORT" ]] ||
         error "端口 $port 无效，必须在 ${MIN_PORT}-${MAX_PORT} 范围内。"
 }
 
@@ -271,12 +305,12 @@ validate_password() {
 
     # 检查解码后的长度
     local decoded_len
-    decoded_len=$(wc -c <"$decoded_file")
+    decoded_len=$(wc -c <"$decoded_file") || error "读取密钥长度失败。"
     if [[ "$decoded_len" -ne "$key_bytes" ]]; then
         rm -f "$decoded_file"
         error "密码解码后的长度必须为 ${key_bytes} 字节，当前为 ${decoded_len} 字节。"
     fi
-    canonical_password=$(base64 <"$decoded_file" | tr -d '\n')
+    canonical_password=$(base64 <"$decoded_file" | tr -d '\n') || error "编码密钥失败。"
     rm -f "$decoded_file"
     [[ "$password" == "$canonical_password" ]] || \
         error "密码必须使用规范的 Base64 编码格式。"
@@ -294,7 +328,7 @@ validate_config_values() {
     local port="$1" password="$2" method="$3" key_bytes
 
     validate_port "$port"
-    key_bytes=$(get_key_bytes "$method")
+    key_bytes=$(get_key_bytes "$method") || error "获取密钥长度失败。"
     validate_password "$password" "$key_bytes"
 }
 
@@ -319,8 +353,51 @@ validate_existing_config_values() {
     local port="$1" password="$2" method="$3" key_bytes
 
     validate_port "$port"
-    key_bytes=$(get_key_bytes "$method")
+    key_bytes=$(get_key_bytes "$method") || error "获取密钥长度失败。"
     validate_existing_password "$password" "$key_bytes"
+}
+
+validate_ipv4() {
+    local ip="$1" octet
+    local -a octets
+    [[ "$ip" =~ ^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$ ]] || return 1
+    IFS=. read -ra octets <<< "$ip"
+    for octet in "${octets[@]}"; do
+        ((10#$octet <= 255)) || return 1
+    done
+}
+
+validate_ipv6() {
+    local ip="$1" tail group left right count=0 compressed=false
+    local -a groups
+    [[ "$ip" == *:* ]] || return 1
+    if [[ "$ip" == *.* ]]; then
+        tail=${ip##*:}
+        validate_ipv4 "$tail" || return 1
+        ip="${ip%:*}:0:0"
+    fi
+    [[ "$ip" =~ ^[0-9a-fA-F:]+$ && "$ip" != *:::* ]] || return 1
+    if [[ "$ip" == *::* ]]; then
+        compressed=true
+        left=${ip%%::*}; right=${ip#*::}
+        [[ "$right" != *::* ]] || return 1
+        ip="${left}${left:+:}${right}"
+        ip=${ip%:}
+    else
+        [[ "$ip" != :* && "$ip" != *: ]] || return 1
+    fi
+    if [[ -n "$ip" ]]; then
+        IFS=: read -ra groups <<< "$ip"
+        for group in "${groups[@]}"; do
+            [[ "$group" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+            count=$((count + 1))
+        done
+    fi
+    if [[ "$compressed" == true ]]; then
+        ((count < 8))
+    else
+        ((count == 8))
+    fi
 }
 
 get_public_ip() {
@@ -332,7 +409,7 @@ get_public_ip() {
             cached_ip=$(<"${INSTALL_DIR}/.public-ip")
         fi
     fi
-    if [[ -n "$cached_ip" ]]; then
+    if validate_ipv4 "$cached_ip" || { [[ "$cached_ip" == \[*\] ]] && validate_ipv6 "${cached_ip:1:${#cached_ip}-2}"; }; then
         echo "$cached_ip"
         return 0
     fi
@@ -366,7 +443,7 @@ get_public_ip() {
     # 尝试获取 IPv6
     for service in "${ipv6_services[@]}"; do
         if ip=$(safe_curl "$service" | tr -d '[:space:]'); then
-            if [[ "$ip" =~ ^[0-9a-fA-F:]+$ && "$ip" == *:* ]]; then
+            if validate_ipv6 "$ip"; then
                 echo "[$ip]"
                 printf '%s\n' "[$ip]" > "${INSTALL_DIR}/.public-ip" 2>/dev/null || true
                 success "成功获取公网 IPv6 地址。"
@@ -418,12 +495,12 @@ check_dependencies() {
         if [[ "${non_interactive:-false}" == "true" ]]; then
             info "将在非交互模式下自动安装..."
         else
-            read -r -p " -> 是否需要现在自动安装它们? (Y/n): " choice < /dev/tty
+            read -r -p " -> 是否需要现在自动安装它们? (Y/n): " choice < /dev/tty || error "输入已终止。"
             if [[ "$choice" =~ ^[Nn]$ ]]; then
                 error "缺少必要的依赖，脚本无法继续运行。"
             fi
         fi
-        install_dependencies "$os_type" "${missing_deps[@]}"
+        install_dependencies "$os_type" "${missing_deps[@]}" || error "安装依赖失败。"
     fi
     success "所有依赖均已满足。"
 }
@@ -451,12 +528,12 @@ install_dependencies() {
     case "$os_type" in
         ubuntu|debian)
             export DEBIAN_FRONTEND=noninteractive
-            apt-get -o DPkg::Lock::Timeout=600 update -y
-            apt-get -o DPkg::Lock::Timeout=600 install -y "${packages[@]}"
+            apt-get -o DPkg::Lock::Timeout=600 update -y || error "更新软件源失败。"
+            apt-get -o DPkg::Lock::Timeout=600 install -y "${packages[@]}" || error "安装依赖失败。"
             ;;
         centos)
             yum install -y epel-release &>/dev/null || true
-            yum install -y "${packages[@]}"
+            yum install -y "${packages[@]}" || error "安装依赖失败。"
             ;;
     esac
     
@@ -522,21 +599,21 @@ download_and_install() {
     fi
 
     # 先准备临时文件，再原子替换，避免写入中断留下损坏二进制。
-    mkdir -p "$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR" || error "创建安装目录失败。"
     local new_binary
     new_binary=$(mktemp "${BINARY_PATH}.new.XXXXXX") || error "创建临时文件失败。"
-    install -m 755 "${TMP_DIR}/ssserver" "$new_binary"
-    mv -f "$new_binary" "$BINARY_PATH"
+    install -m 755 "${TMP_DIR}/ssserver" "$new_binary" || error "安装程序失败。"
+    mv -f "$new_binary" "$BINARY_PATH" || error "替换程序失败。"
 
     # 创建版本文件
     local new_version
     new_version=$(mktemp "${VERSION_FILE}.new.XXXXXX") || error "创建临时文件失败。"
-    printf '%s\n' "$version" > "$new_version"
-    chmod 644 "$new_version"
-    chown root:root "$new_version"
-    mv -f "$new_version" "$VERSION_FILE"
+    printf '%s\n' "$version" > "$new_version" || error "写入版本失败。"
+    chmod 644 "$new_version" || error "设置版本权限失败。"
+    chown root:root "$new_version" || error "设置版本所有者失败。"
+    mv -f "$new_version" "$VERSION_FILE" || error "替换版本失败。"
 
-    success "shadowsocks-rust v${version} 安装成功。"
+    info "程序 v${version} 已写入。"
 }
 
 # --- 配置写入函数 ---
@@ -546,17 +623,24 @@ write_config() {
     local method="$3"
     
     # 确保安装目录存在
-    mkdir -p "$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR" || error "创建安装目录失败。"
     
     # 生成配置文件
     local tmp_config
     tmp_config=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX") || error "创建临时文件失败。"
 
-    jq -n \
+    local source=/dev/null
+    local -a jq_mode=(-n)
+    if [[ -f "$CONFIG_PATH" ]]; then
+        jq -se 'length == 1 and (.[0] | type == "object")' "$CONFIG_PATH" >/dev/null || error "原配置不是单个 JSON 对象。"
+        source="$CONFIG_PATH"
+        jq_mode=()
+    fi
+    jq -e "${jq_mode[@]}" \
         --argjson server_port "$port" \
         --arg password "$password" \
         --arg method "$method" \
-        '{
+        'if . == null then {
             "server": "::",
             "server_port": $server_port,
             "password": $password,
@@ -565,12 +649,14 @@ write_config() {
             "mode": "tcp_and_udp",
             "timeout": 300,
             "no_delay": true
-        }' > "$tmp_config"
+        } elif type == "object" then . else error("invalid config") end
+        | .server_port = $server_port | .password = $password | .method = $method' \
+        "$source" > "$tmp_config" || error "生成配置失败。"
     
     # 设置严格的文件权限（nobody 用户运行需可读；root 拥有）
-    chmod 644 "$tmp_config"
-    chown root:root "$tmp_config"
-    mv -f "$tmp_config" "$CONFIG_PATH"
+    chmod 644 "$tmp_config" || error "设置配置权限失败。"
+    chown root:root "$tmp_config" || error "设置配置所有者失败。"
+    mv -f "$tmp_config" "$CONFIG_PATH" || error "替换配置失败。"
 }
 
 generate_config() {
@@ -580,11 +666,11 @@ generate_config() {
     local key_bytes
 
     if [[ -z "${3:-}" && -z "$port" ]]; then
-        read -r -p " -> 加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (默认: 1): " method_choice < /dev/tty
+        read -r -p " -> 加密: 1 AES / 2 ChaCha (默认 1): " method_choice < /dev/tty || error "输入已终止。"
         [[ "$method_choice" == "2" ]] && method="2022-blake3-chacha20-poly1305"
         [[ -z "$method_choice" || "$method_choice" == "1" || "$method_choice" == "2" ]] || error "无效的加密方式选项"
     fi
-    key_bytes=$(get_key_bytes "$method")
+    key_bytes=$(get_key_bytes "$method") || error "获取密钥长度失败。"
 
     info "正在生成配置文件..."
     info "使用加密方式: ${method}"
@@ -592,9 +678,9 @@ generate_config() {
     # 端口验证和输入
     if [[ -z "$port" ]]; then
         while true; do
-            read -r -p " -> 请输入端口 [${MIN_PORT}-${MAX_PORT}] (默认: ${C_CYAN}${DEFAULT_PORT}${C_RESET}): " port < /dev/tty
+            read -r -p " -> 请输入端口 [${MIN_PORT}-${MAX_PORT}] (默认: ${DEFAULT_PORT}): " port < /dev/tty || error "输入已终止。"
             port=${port:-$DEFAULT_PORT}
-            if [[ "$port" =~ ^[1-9][0-9]*$ && "$port" -le $MAX_PORT ]]; then
+            if [[ "$port" =~ ^[1-9][0-9]{0,4}$ && "$port" -le $MAX_PORT ]]; then
                 if ( check_port_available "$port" 2>/dev/null ); then
                     break
                 fi
@@ -612,7 +698,8 @@ generate_config() {
     # 密码验证和输入（校验失败可重新输入，与端口输入一致）
     if [[ -z "$password" ]]; then
         while true; do
-            read -r -p " -> 请输入密码 (留空则随机生成): " password_input < /dev/tty
+            read -r -s -p " -> 密钥 (回车随机): " password_input < /dev/tty || error "输入已终止。"
+            printf '\n' >&2
             if [[ -z "$password_input" ]]; then
                 info "为 ${method} 生成 ${key_bytes} 字节随机密码..."
                 password=$(openssl rand -base64 "$key_bytes") || error "生成随机密码失败。"
@@ -633,13 +720,13 @@ generate_config() {
     validate_config_values "$port" "$password" "$method"
 
     # 写入新配置
-    write_config "$port" "$password" "$method"
+    write_config "$port" "$password" "$method" || error "写入配置失败。"
     success "配置文件已创建于 $CONFIG_PATH"
 }
 
 create_systemd_service() {
     info "正在创建 systemd 服务..."
-    cat > "$SYSTEMD_SERVICE_FILE" << EOF
+    cat > "$SYSTEMD_SERVICE_FILE" << EOF || error "写入服务失败。"
 [Unit]
 Description=Shadowsocks-rust Server Service
 After=network.target network-online.target
@@ -663,7 +750,7 @@ ProtectSystem=full
 WantedBy=multi-user.target
 EOF
 
-    chmod 644 "$SYSTEMD_SERVICE_FILE"
+    chmod 644 "$SYSTEMD_SERVICE_FILE" || error "设置服务权限失败。"
     if ! systemctl daemon-reload; then
         error "systemd daemon-reload 失败。"
     fi
@@ -705,9 +792,9 @@ manage_service() {
             fi
             ;;
         status)
-            printf '%b\n' "\\n${C_YELLOW}=== 服务状态 ===${C_RESET}"
+            cprintf '%b\n' "\\n${C_YELLOW}=== 服务状态 ===${C_RESET}"
             systemctl status --full --no-pager ss-rust || true
-            printf '%b\n' "\\n${C_YELLOW}=== 最新日志 ===${C_RESET}"
+            cprintf '%b\n' "\\n${C_YELLOW}=== 最新日志 ===${C_RESET}"
             journalctl -u ss-rust --no-pager -n 10 || true
             ;;
         *)
@@ -738,23 +825,22 @@ run_uninstall_logic() {
                     error "ss-rust 服务仍在运行，已中止卸载。"
                 fi
             fi
-            systemctl disable ss-rust &>/dev/null || warn "无法禁用 ss-rust 服务自启，请手动执行 systemctl disable ss-rust。"
+            systemctl disable ss-rust &>/dev/null || error "无法禁用服务，已中止卸载。"
         fi
     fi
 
     # 删除所有相关文件、配置和临时备份
     info "正在删除所有相关文件和配置..."
-    rm -f "$BINARY_PATH" "$SYSTEMD_SERVICE_FILE"
-    rm -rf "$INSTALL_DIR"
-    cleanup
+    rm -f "$BINARY_PATH" "$SYSTEMD_SERVICE_FILE" || error "删除程序或服务失败。"
+    rm -rf "$INSTALL_DIR" || error "删除配置失败。"
 
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl daemon-reload || warn "systemd 重载失败，请手动执行 systemctl daemon-reload。"
+        systemctl daemon-reload || error "systemd 重载失败。"
         systemctl reset-failed ss-rust >/dev/null 2>&1 || true
     fi
-    cleanup_uninstall_residue
+    cleanup_uninstall_residue || error "清理卸载残留失败。"
 
-    success "卸载完成，未保留相关文件。"
+    success "卸载完成；恢复目录不自动删除。"
 }
 
 install_flow() {
@@ -762,15 +848,15 @@ install_flow() {
     local os_type arch
 
     check_systemd
-    os_type=$(detect_os)
-    check_dependencies "$os_type"
-    arch=$(detect_arch)
-    backup_install_state
+    os_type=$(detect_os) || error "检测系统失败。"
+    check_dependencies "$os_type" || error "检查依赖失败。"
+    arch=$(detect_arch) || error "检测架构失败。"
+    backup_install_state || error "备份失败。"
     # 残留处理：unit 存在但程序不存在（中断的卸载/手动删除残留）→ 移除旧 unit，让下方重建正式服务
     if [[ -f "$SYSTEMD_SERVICE_FILE" && ! -f "$BINARY_PATH" ]]; then
         warn "检测到残留的 systemd 服务文件（程序不存在），正在移除并重新创建服务..."
-        rm -f "$SYSTEMD_SERVICE_FILE"
-        systemctl daemon-reload >/dev/null 2>&1 || true
+        rm -f "$SYSTEMD_SERVICE_FILE" || error "删除残留服务失败。"
+        systemctl daemon-reload >/dev/null 2>&1 || error "重载服务失败。"
     fi
     if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then
         if systemctl is-active --quiet ss-rust 2>/dev/null; then
@@ -782,23 +868,23 @@ install_flow() {
         warn "检测到残留的 ss-rust 进程（服务文件缺失），正在终止..."
         pkill -x ss-rust || error "无法终止残留的 ss-rust 进程，已中止操作。"
     fi
-    version=${version:-$(get_latest_version)}
-    download_and_install "$version" "$arch"
+    version=${version:-$(get_latest_version)} || error "获取版本失败。"
+    download_and_install "$version" "$arch" || error "安装程序失败。"
 
     if [[ "$configure" == true ]]; then
         if [[ -n "$port" || -n "$password" ]]; then
-            generate_config "$port" "$password" "$method"
+            generate_config "$port" "$password" "$method" || error "生成配置失败。"
         else
             # 交互安装必须不传第三个参数，否则 generate_config 会误判为已指定加密方式。
-            generate_config
+            generate_config || error "生成配置失败。"
         fi
     fi
     # 仅首次安装时创建服务并设为自启；更新/重装保留用户既有的 unit 与自启状态。
     if [[ ! -f "$SYSTEMD_SERVICE_FILE" ]]; then
-        create_systemd_service
-        manage_service "restart"
+        create_systemd_service || error "创建服务失败。"
+        manage_service "restart" || error "启动服务失败。"
     elif [[ -f "${TMP_DIR}/was-active" ]]; then
-        manage_service "restart"
+        manage_service "restart" || error "启动服务失败。"
     else
         info "服务在操作前处于停止状态，完成后保持停止。"
     fi
@@ -808,28 +894,28 @@ install_flow() {
 do_install() {
     if [[ -f "$BINARY_PATH" ]]; then
         warn "检测到 shadowsocks-rust 已安装。"
-        read -r -p " -> 是否要重新安装? (y/N): " choice < /dev/tty
+        read -r -p " -> 是否要重新安装? (y/N): " choice < /dev/tty || error "输入已终止。"
         if [[ ! "$choice" =~ ^[Yy]$ ]]; then
             info "安装已取消。"
             return
         fi
         if [[ -f "$CONFIG_PATH" ]]; then
-            read -r -p " -> 是否保留当前配置? (Y/n): " keep_choice < /dev/tty
+            read -r -p " -> 是否保留当前配置? (Y/n): " keep_choice < /dev/tty || error "输入已终止。"
             if [[ "$keep_choice" =~ ^[Nn]$ ]]; then
                 info "将覆盖现有安装并重新配置..."
-                install_flow true
+                install_flow true || error "安装失败。"
             else
                 info "将重新安装并保留现有配置..."
-                install_flow false
+                install_flow false || error "安装失败。"
             fi
         else
-            install_flow true
+            install_flow true || error "安装失败。"
         fi
     else
-        install_flow true
+        install_flow true || error "安装失败。"
     fi
 
-    success "安装完成，shadowsocks-rust 已成功启动！"
+    success "安装完成；已有服务保留原运行状态。"
     view_config
 }
 
@@ -845,7 +931,7 @@ do_update() {
     config_line=$(load_config) || return 1
     IFS=$'\t' read -r current_port current_password current_method <<< "$config_line"
     validate_existing_config_values "$current_port" "$current_password" "$current_method"
-    latest_version=$(get_latest_version)
+    latest_version=$(get_latest_version) || error "获取版本失败。"
 
     if [[ "$current_version" == "$latest_version" ]]; then
         info "您当前已是最新版本: v$current_version"
@@ -854,7 +940,7 @@ do_update() {
 
     info "发现新版本，准备从 v$current_version 更新到 v$latest_version..."
     
-    install_flow false "" "" "$DEFAULT_ENCRYPTION_METHOD" "$latest_version"
+    install_flow false "" "" "$DEFAULT_ENCRYPTION_METHOD" "$latest_version" || error "更新失败。"
     success "更新完成！"
 }
 
@@ -864,7 +950,7 @@ do_uninstall() {
         return
     fi
 
-    read -r -p " -> 您确定要完全卸载 shadowsocks-rust 吗? (Y/n): " choice < /dev/tty
+    read -r -p " -> 您确定要完全卸载 shadowsocks-rust 吗? (Y/n): " choice < /dev/tty || error "输入已终止。"
     if [[ "$choice" =~ ^[Nn]$ ]]; then
         info "已取消卸载操作。"
         return
@@ -885,18 +971,17 @@ do_modify_config() {
     config_line=$(load_config) || return 1
     IFS=$'\t' read -r current_port current_password current_method <<< "$config_line"
     validate_existing_config_values "$current_port" "$current_password" "$current_method"
-    key_bytes=$(get_key_bytes "$current_method")
+    key_bytes=$(get_key_bytes "$current_method") || error "获取密钥长度失败。"
 
     info "当前配置："
     info "  端口: $current_port"
-    info "  密码: $current_password"
     info "  加密方式: $current_method"
     echo ""
     info "请输入新配置 (直接回车则保留当前值)"
 
     local new_method method_choice
     while true; do
-        read -r -p " -> 加密方式 [1: 2022-blake3-aes-128-gcm, 2: 2022-blake3-chacha20-poly1305] (当前: ${current_method}, 回车保留): " method_choice < /dev/tty
+        read -r -p " -> 加密: 1 AES / 2 ChaCha (回车保留): " method_choice < /dev/tty || error "输入已终止。"
         if [[ -z "$method_choice" ]]; then
             new_method="$current_method"
             break
@@ -910,13 +995,13 @@ do_modify_config() {
             warn "无效的加密方式选项，请输入 1、2 或直接回车。"
         fi
     done
-    key_bytes=$(get_key_bytes "$new_method")
+    key_bytes=$(get_key_bytes "$new_method") || error "获取密钥长度失败。"
 
     # 端口输入和验证
     while true; do
-        read -r -p " -> 新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${C_CYAN}${current_port}${C_RESET}): " new_port < /dev/tty
+        read -r -p " -> 新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${current_port}): " new_port < /dev/tty || error "输入已终止。"
         new_port=${new_port:-$current_port}
-        if [[ "$new_port" =~ ^[1-9][0-9]*$ && "$new_port" -le $MAX_PORT ]]; then
+        if [[ "$new_port" =~ ^[1-9][0-9]{0,4}$ && "$new_port" -le $MAX_PORT ]]; then
             if [[ "$new_port" != "$current_port" ]] && ! ( check_port_available "$new_port" 2>/dev/null ); then
                 warn "端口 ${new_port} 已被占用，请换一个端口。"
                 continue
@@ -928,7 +1013,9 @@ do_modify_config() {
     done
 
     # 密码输入和验证
-    read -r -p " -> 新密码 (当前: ${current_password}, 留空保留; 切换加密方式时留空将重新生成, 输入 'random' 生成新的): " new_password_input < /dev/tty
+    info "回车保留密钥；切换加密时自动生成。"
+    read -r -s -p " -> 新密钥 (random 随机): " new_password_input < /dev/tty || error "输入已终止。"
+    printf '\n' >&2
     if [[ -z "$new_password_input" ]]; then
         if [[ "$new_method" != "$current_method" ]]; then
             info "加密方式已更改，正在生成符合新加密方式的随机密码..."
@@ -940,7 +1027,7 @@ do_modify_config() {
     elif [[ "$new_password_input" == "random" ]]; then
         info "正在生成新的随机密码..."
         new_password=$(openssl rand -base64 "$key_bytes") || error "生成随机密码失败。"
-        success "新密码: ${new_password}"
+        success "已生成新密钥。"
     else
         new_password=$new_password_input
     fi
@@ -959,13 +1046,13 @@ do_modify_config() {
     fi
 
     # 写入新配置
-    backup_install_state
+    backup_install_state || error "备份失败。"
     info "正在写入新配置..."
-    write_config "$new_port" "$new_password" "$new_method"
+    write_config "$new_port" "$new_password" "$new_method" || error "写入配置失败。"
 
     if [[ -f "${TMP_DIR}/was-active" ]]; then
         info "正在重启服务以应用新配置..."
-        manage_service "restart"
+        manage_service "restart" || error "启动服务失败。"
     else
         info "服务当前处于停止状态，配置已更新，将在下次启动时生效。"
     fi
@@ -984,8 +1071,8 @@ generate_ss_url() {
     local encoded_userinfo encoded_name
 
     encoded_userinfo=$(printf '%s:%s' "$method" "$password" |
-        base64 | tr '+/' '-_' | tr -d '=\n')
-    encoded_name=$(printf '%s' "$node_name" | jq -sRr @uri)
+        base64 | tr '+/' '-_' | tr -d '=\n') || return 1
+    encoded_name=$(printf '%s' "$node_name" | jq -sRr @uri) || return 1
     printf 'ss://%s@%s:%s#%s\n' \
         "$encoded_userinfo" "$ip_address" "$port" "$encoded_name"
 }
@@ -1007,28 +1094,28 @@ view_config() {
     {
         echo ""
         draw_divider
-        printf '%b\n' "  ${C_CYAN}Shadowsocks-2022 配置信息${C_RESET}"
+        cprintf '%b\n' "  ${C_CYAN}Shadowsocks-2022 配置信息${C_RESET}"
         draw_divider
-        printf '%b\n' "  ${C_YELLOW}节点名称:${C_RESET}       ${node_name}"
+        cprintf '%b\n' "  ${C_YELLOW}节点名称:${C_RESET}       ${node_name}"
         if [[ -n "$ip_address" ]]; then
-            printf '%b\n' "  ${C_YELLOW}服务器地址:${C_RESET}     ${ip_address}"
+            cprintf '%b\n' "  ${C_YELLOW}服务器地址:${C_RESET}     ${ip_address}"
         else
-            printf '%b\n' "  ${C_YELLOW}服务器地址:${C_RESET}     请手动填写服务器地址"
+            cprintf '%b\n' "  ${C_YELLOW}服务器地址:${C_RESET}     请手动填写服务器地址"
         fi
-        printf '%b\n' "  ${C_YELLOW}端口:${C_RESET}           ${port}"
-        printf '%b\n' "  ${C_YELLOW}密码:${C_RESET}           ${password}"
-        printf '%b\n' "  ${C_YELLOW}加密方式:${C_RESET}       ${method}"
+        cprintf '%b\n' "  ${C_YELLOW}端口:${C_RESET}           ${port}"
+        cprintf '%b\n' "  ${C_YELLOW}密码:${C_RESET}           ${password}"
+        cprintf '%b\n' "  ${C_YELLOW}加密方式:${C_RESET}       ${method}"
         draw_divider
         echo ""
         if [[ -n "$ip_address" ]]; then
-            ss_link=$(generate_ss_url "$ip_address" "$port" "$password" "$method" "$node_name")
-            printf '%b\n' "  ${C_GREEN}SS链接:${C_RESET}"
-            printf '%b\n' "  ${ss_link}"
+            ss_link=$(generate_ss_url "$ip_address" "$port" "$password" "$method" "$node_name") || error "生成链接失败。"
+            cprintf '%b\n' "  ${C_GREEN}SS链接:${C_RESET}"
+            cprintf '%b\n' "  ${ss_link}"
         else
-            printf '%b\n' "  ${C_YELLOW}SS链接:${C_RESET} 无法生成，请手动填写服务器地址"
+            cprintf '%b\n' "  ${C_YELLOW}SS链接:${C_RESET} 无法生成，请手动填写服务器地址"
         fi
         echo ""
-        printf '%b\n' "  ${C_BLUE}提示:${C_RESET} 复制上面的SS链接导入到客户端即可使用"
+        cprintf '%b\n' "  ${C_BLUE}提示:${C_RESET} 复制上面的SS链接导入到客户端即可使用"
         draw_divider
     } >&2
 }
@@ -1036,8 +1123,8 @@ view_config() {
 main_menu() {
     while true; do
         clear >/dev/null 2>&1 || true
-        printf '%b\n' "${C_CYAN} Shadowsocks-rust 管理脚本${C_RESET}"
-        printf '%b\n' "${C_YELLOW} Version: v${SCRIPT_VERSION}${C_RESET}"
+        cprintf '%b\n' "${C_CYAN} Shadowsocks-rust 管理脚本${C_RESET}"
+        cprintf '%b\n' "${C_YELLOW} Version: v${SCRIPT_VERSION}${C_RESET}"
         draw_divider
 
         local status_info
@@ -1051,14 +1138,14 @@ main_menu() {
         else
             status_info="${C_RED}未安装${C_RESET}"
         fi
-        printf '%b\n' "  状态: ${status_info}"
+        cprintf '%b\n' "  状态: ${status_info}"
         draw_divider
 
-        menu_item "$C_GREEN" "1." "安装 Shadowsocks-rust"
-        menu_item "$C_CYAN" "2." "更新 Shadowsocks-rust"
-        menu_item "$C_RED" "3." "卸载 Shadowsocks-rust"
+        menu_item "$C_GREEN" "1." "安装"
+        menu_item "$C_CYAN" "2." "更新"
+        menu_item "$C_RED" "3." "卸载"
         draw_divider
-        menu_item "$C_YELLOW" "4." "修改配置 (加密方式/端口/密码)"
+        menu_item "$C_YELLOW" "4." "修改配置"
         menu_item "$C_CYAN" "5." "查看配置信息"
         draw_divider
         menu_item "$C_CYAN" "6." "启动服务"
@@ -1101,8 +1188,11 @@ main_menu() {
 # --- 脚本入口 ---
 main() {
     # 优先检查并响应帮助选项，普通用户查阅说明不应被 root 权限拦截
-    local arg
+    local arg argc=$#
     for arg in "$@"; do
+        if [[ "$arg" == -u || "$arg" == --uninstall ]] && [[ $argc -ne 1 ]]; then
+            error "卸载选项必须单独使用。" 2
+        fi
         if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
             if [[ $# -ne 1 ]]; then
                 error "选项 $arg 不接受多余参数" 2
@@ -1170,7 +1260,7 @@ EOF
                     error "选项 $1 不接受多余参数" 2
                 fi
                 init_temp_dir
-                run_uninstall_logic
+                run_uninstall_logic || error "卸载失败。"
                 exit 0
                 ;;
             *)
@@ -1197,14 +1287,14 @@ EOF
         fi
 
         info "开始检查依赖、下载并安装..."
-        install_flow true "$ss_port" "$ss_password" "$ss_method"
+        install_flow true "$ss_port" "$ss_password" "$ss_method" || error "安装失败。"
 
         info "显示最终配置..."
         view_config
         exit 0
         
-    elif [[ -n "$ss_port" || -n "$ss_password" ]]; then
-        error "一键安装模式需要同时提供 --port 和 --password 参数。"
+    elif [[ $argc -gt 0 ]]; then
+        error "一键安装需要同时提供 --port 和 --password。" 2
     else
         check_tty
         main_menu
