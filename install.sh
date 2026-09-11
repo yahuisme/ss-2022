@@ -666,7 +666,7 @@ generate_config() {
     local key_bytes
 
     if [[ -z "${3:-}" && -z "$port" ]]; then
-        printf '%s\n' "  1. 2022-blake3-aes-128-gcm" "  2. 2022-blake3-chacha20-poly1305" >&2
+        printf '%s\n' "  1. 2022-blake3-aes-128-gcm" "  2. 2022-blake3-chacha20-poly1305" "  有 AES 加速优先 AES，否则选 ChaCha。" >&2
         read -r -p " -> 加密方式 [1-2] (默认: 1): " method_choice < /dev/tty || error "输入已终止。"
         [[ "$method_choice" == "2" ]] && method="2022-blake3-chacha20-poly1305"
         [[ -z "$method_choice" || "$method_choice" == "1" || "$method_choice" == "2" ]] || error "无效的加密方式选项"
@@ -983,7 +983,7 @@ do_modify_config() {
     info "请输入新配置 (直接回车则保留当前值)"
 
     local new_method method_choice
-    printf '%s\n' "  1. 2022-blake3-aes-128-gcm" "  2. 2022-blake3-chacha20-poly1305" >&2
+    printf '%s\n' "  1. 2022-blake3-aes-128-gcm" "  2. 2022-blake3-chacha20-poly1305" "  有 AES 加速优先 AES，否则选 ChaCha。" >&2
     while true; do
         read -r -p " -> 加密方式 [1-2] (回车保留): " method_choice < /dev/tty || error "输入已终止。"
         if [[ -z "$method_choice" ]]; then
@@ -1119,7 +1119,9 @@ view_config() {
             cprintf '%b\n' "  ${C_YELLOW}SS链接:${C_RESET} 无法生成，请手动填写服务器地址"
         fi
         echo ""
-        cprintf '%b\n' "  ${C_BLUE}提示:${C_RESET} 复制上面的SS链接导入到客户端即可使用"
+        if [[ -n "$ip_address" ]]; then
+            cprintf '%b\n' "  ${C_BLUE}提示:${C_RESET} 用支持 SS-2022 的客户端导入链接；先启动服务并放行 TCP/UDP 端口。"
+        fi
         draw_divider
     } >&2
 }

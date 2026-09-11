@@ -7,8 +7,8 @@ Shadowsocks 2022 一键安装与管理脚本，基于
 
 支持 Debian、Ubuntu、CentOS，以及 x86_64、aarch64、armv7l：
 
-- `2022-blake3-aes-128-gcm`
-- `2022-blake3-chacha20-poly1305`
+- `2022-blake3-aes-128-gcm`：默认，16 字节密钥，适合有 AES 硬件加速的设备。
+- `2022-blake3-chacha20-poly1305`：32 字节密钥，适合无 AES 硬件加速的设备。
 
 ## 安装
 
@@ -55,7 +55,7 @@ journalctl -u ss-rust -n 50 --no-pager
 
 请放行实际使用的 TCP/UDP 端口。
 
-菜单输出到 stdout，日志和配置信息（含密钥及 SS 链接）输出到 stderr；重定向 stdout 不会隐藏密钥。颜色按实际输出目标判断：非 TTY、设置 `NO_COLOR`（含空值）或 `TERM=dumb` 时不输出 ANSI 颜色。密钥输入不回显，修改提示不重复展示原密钥。
+菜单输出到 stdout，日志和配置信息（含密钥及 SS 链接）输出到 stderr；重定向 stdout 不会隐藏密钥。颜色按实际输出目标判断：非 TTY、设置 `NO_COLOR`（含空值）或 `TERM=dumb` 时不输出 ANSI 颜色。密钥输入不回显，但修改前会展示当前密钥。安装时密钥留空随机生成；修改时留空保留，切换加密方式后留空则重新随机生成；修改时输入 `random` 始终随机生成。
 
 更新、重装和修改配置保留已有服务的启停及自启状态；原来停止的服务不会自动启动。修改配置仅替换 `server_port`、`password`、`method`，保留 `server`、`mode`、`nameserver`、`acl` 等自定义字段；非法 JSON 会被拒绝。
 
