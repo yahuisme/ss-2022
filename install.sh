@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.09.10"
+readonly SCRIPT_VERSION="26.09.11"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -430,7 +430,7 @@ get_public_ip() {
                 done
                 if [[ "$valid" == true ]]; then
                     echo "$ip"
-                    printf '%s\n' "$ip" > "${INSTALL_DIR}/.public-ip" 2>/dev/null || true
+                    { [[ -d "${INSTALL_DIR}" ]] && printf '%s\n' "$ip" 2>/dev/null > "${INSTALL_DIR}/.public-ip"; } || true
                     success "成功获取公网 IPv4 地址。"
                     return 0
                 fi
@@ -445,7 +445,7 @@ get_public_ip() {
         if ip=$(safe_curl "$service" | tr -d '[:space:]'); then
             if validate_ipv6 "$ip"; then
                 echo "[$ip]"
-                printf '%s\n' "[$ip]" > "${INSTALL_DIR}/.public-ip" 2>/dev/null || true
+                { [[ -d "${INSTALL_DIR}" ]] && printf '%s\n' "[$ip]" 2>/dev/null > "${INSTALL_DIR}/.public-ip"; } || true
                 success "成功获取公网 IPv6 地址。"
                 return 0
             fi
@@ -666,7 +666,8 @@ generate_config() {
     local key_bytes
 
     if [[ -z "${3:-}" && -z "$port" ]]; then
-        read -r -p " -> 加密: 1 AES / 2 ChaCha (默认 1): " method_choice < /dev/tty || error "输入已终止。"
+        printf '%s\n' "  1. 2022-blake3-aes-128-gcm" "  2. 2022-blake3-chacha20-poly1305" >&2
+        read -r -p " -> 加密方式 [1-2] (默认: 1): " method_choice < /dev/tty || error "输入已终止。"
         [[ "$method_choice" == "2" ]] && method="2022-blake3-chacha20-poly1305"
         [[ -z "$method_choice" || "$method_choice" == "1" || "$method_choice" == "2" ]] || error "无效的加密方式选项"
     fi
@@ -698,7 +699,7 @@ generate_config() {
     # 密码验证和输入（校验失败可重新输入，与端口输入一致）
     if [[ -z "$password" ]]; then
         while true; do
-            read -r -s -p " -> 密钥 (回车随机): " password_input < /dev/tty || error "输入已终止。"
+            read -r -s -p " -> 密钥 (${key_bytes} 字节的规范 Base64，输入不回显；回车随机): " password_input < /dev/tty || error "输入已终止。"
             printf '\n' >&2
             if [[ -z "$password_input" ]]; then
                 info "为 ${method} 生成 ${key_bytes} 字节随机密码..."
@@ -950,7 +951,8 @@ do_uninstall() {
         return
     fi
 
-    read -r -p " -> 您确定要完全卸载 shadowsocks-rust 吗? (Y/n): " choice < /dev/tty || error "输入已终止。"
+    warn "将删除程序、服务及全部配置；恢复目录不自动删除。"
+    read -r -p " -> 确认卸载 shadowsocks-rust? (Y/n，回车确认): " choice < /dev/tty || error "输入已终止。"
     if [[ "$choice" =~ ^[Nn]$ ]]; then
         info "已取消卸载操作。"
         return
@@ -975,13 +977,15 @@ do_modify_config() {
 
     info "当前配置："
     info "  端口: $current_port"
+    info "  密钥: $current_password"
     info "  加密方式: $current_method"
     echo ""
     info "请输入新配置 (直接回车则保留当前值)"
 
     local new_method method_choice
+    printf '%s\n' "  1. 2022-blake3-aes-128-gcm" "  2. 2022-blake3-chacha20-poly1305" >&2
     while true; do
-        read -r -p " -> 加密: 1 AES / 2 ChaCha (回车保留): " method_choice < /dev/tty || error "输入已终止。"
+        read -r -p " -> 加密方式 [1-2] (回车保留): " method_choice < /dev/tty || error "输入已终止。"
         if [[ -z "$method_choice" ]]; then
             new_method="$current_method"
             break
@@ -1013,8 +1017,8 @@ do_modify_config() {
     done
 
     # 密码输入和验证
-    info "回车保留密钥；切换加密时自动生成。"
-    read -r -s -p " -> 新密钥 (random 随机): " new_password_input < /dev/tty || error "输入已终止。"
+    info "新密钥须为 ${key_bytes} 字节的规范 Base64；回车保留，切换加密方式时回车则随机生成。"
+    read -r -s -p " -> 新密钥 (输入不回显；random 随机): " new_password_input < /dev/tty || error "输入已终止。"
     printf '\n' >&2
     if [[ -z "$new_password_input" ]]; then
         if [[ "$new_method" != "$current_method" ]]; then
@@ -1145,7 +1149,7 @@ main_menu() {
         menu_item "$C_CYAN" "2." "更新"
         menu_item "$C_RED" "3." "卸载"
         draw_divider
-        menu_item "$C_YELLOW" "4." "修改配置"
+        menu_item "$C_YELLOW" "4." "修改加密方式/端口/密钥"
         menu_item "$C_CYAN" "5." "查看配置信息"
         draw_divider
         menu_item "$C_CYAN" "6." "启动服务"
