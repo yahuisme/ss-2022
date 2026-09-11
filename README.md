@@ -35,7 +35,7 @@ PASSWORD="$(openssl rand -base64 32)" && bash <(curl -fsSL https://raw.githubuse
 查看帮助：
 
 ```bash
-bash install.sh --help
+bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/install.sh) --help
 ```
 
 ## 卸载
