@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.09.11"
+readonly SCRIPT_VERSION="26.09.27"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -66,7 +66,7 @@ INSTALL_COMMITTED=false
 
 restore_install_state() {
     [[ "$BACKUP_ACTIVE" == true ]] || return 0
-    local failed=false name target mode
+    local failed=false name target staged
     # 首次安装失败：先停止并禁用新服务，避免删除 unit 后遗留运行进程。
     if [[ ! -f "${TMP_DIR}/old-service" && -f "$SYSTEMD_SERVICE_FILE" ]]; then
         if ! systemctl stop ss-rust || ! systemctl disable ss-rust; then
@@ -76,13 +76,18 @@ restore_install_state() {
     fi
     for name in binary version config service; do
         case "$name" in
-            binary) target="$BINARY_PATH"; mode=755 ;;
-            version) target="$VERSION_FILE"; mode=644 ;;
-            config) target="$CONFIG_PATH"; mode=644 ;;
-            service) target="$SYSTEMD_SERVICE_FILE"; mode=644 ;;
+            binary) target="$BINARY_PATH" ;;
+            version) target="$VERSION_FILE" ;;
+            config) target="$CONFIG_PATH" ;;
+            service) target="$SYSTEMD_SERVICE_FILE" ;;
         esac
         if [[ -f "${TMP_DIR}/old-$name" ]]; then
-            install -m "$mode" "${TMP_DIR}/old-$name" "$target" || failed=true
+            # 同目录暂存并原子替换，保留快照权限/属主/时间，不覆盖运行中的 inode。
+            staged=$(mktemp "${target}.restore.XXXXXX") || { failed=true; continue; }
+            if ! cp -p "${TMP_DIR}/old-$name" "$staged" || ! mv -f "$staged" "$target"; then
+                rm -f "$staged" || true
+                failed=true
+            fi
         else
             rm -f "$target" || failed=true
         fi
@@ -254,24 +259,21 @@ check_tty() {
 
 # --- 端口可用性检查 ---
 check_port_available() {
-    local port="$1"
-    local port_in_use=false
-
-    if command -v ss >/dev/null 2>&1; then
-        if ss -H -ltn "sport = :$port" 2>/dev/null | grep -q . || \
-           ss -H -lun "sport = :$port" 2>/dev/null | grep -q .; then
-            port_in_use=true
+    local port="$1" tcp udp listeners
+    if command -v ss >/dev/null 2>&1 &&
+       tcp=$(ss -H -ltn "sport = :$port" 2>/dev/null) &&
+       udp=$(ss -H -lun "sport = :$port" 2>/dev/null); then
+        [[ -z "$tcp$udp" ]] || error "端口 ${port} 已被占用，请选择其他端口。"
+        return 0
+    fi
+    # Older ss may not support -H; a successful netstat query covers both protocols.
+    if command -v netstat >/dev/null 2>&1 && listeners=$(netstat -tuln 2>/dev/null); then
+        if awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' <<< "$listeners"; then
+            error "端口 ${port} 已被占用，请选择其他端口。"
         fi
+        return 0
     fi
-    # ss 不可用或版本过旧（iproute2 < 4.9 无 -H，调用失败）时回退 netstat，避免静默跳过检查
-    if [[ "$port_in_use" == false ]] && command -v netstat >/dev/null 2>&1; then
-        if netstat -tuln 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" || $4 ~ p" " {found=1} END {exit !found}'; then
-            port_in_use=true
-        fi
-    fi
-    if [[ "$port_in_use" == true ]]; then
-        error "端口 ${port} 已被占用，请选择其他端口。"
-    fi
+    error "无法查询 TCP/UDP 监听状态，请检查 ss 或 netstat。" 3
 }
 
 validate_port() {
@@ -342,11 +344,12 @@ validate_existing_password() {
     if [[ ! "$password" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
         error "配置中的密码不是有效的 Base64 字符串，请使用选项 4 重新设置密码。"
     fi
-    local decoded_len
-    decoded_len=$(printf '%s' "$password" | decode_base64 2>/dev/null | wc -c)
-    if [[ "$decoded_len" -ne "$key_bytes" ]]; then
-        error "配置中的密码解码后长度（${decoded_len} 字节）与加密方式要求的 ${key_bytes} 字节不匹配，请使用选项 4 重新设置密码。"
-    fi
+    # Normalize only optional padding, then reuse strict decoding and pad-bit checks.
+    local unpadded="${password%%=*}" normalized
+    normalized="$unpadded"
+    while (( ${#normalized} % 4 != 0 )); do normalized+='='; done
+    [[ ${#password} -le ${#normalized} ]] || error "配置中的 Base64 填充无效。"
+    validate_password "$normalized" "$key_bytes"
 }
 
 validate_existing_config_values() {
@@ -371,6 +374,8 @@ validate_ipv6() {
     local ip="$1" tail group left right count=0 compressed=false
     local -a groups
     [[ "$ip" == *:* ]] || return 1
+    [[ "$ip" != :* || "$ip" == ::* ]] || return 1
+    [[ "$ip" != *: || "$ip" == *:: ]] || return 1
     if [[ "$ip" == *.* ]]; then
         tail=${ip##*:}
         validate_ipv4 "$tail" || return 1
@@ -481,7 +486,7 @@ detect_arch() {
 check_dependencies() {
     info "正在检查必要的依赖工具..."
     local os_type="$1"
-    local dependencies=("curl" "jq" "tar" "xz" "openssl")
+    local dependencies=("curl" "jq" "tar" "xz" "openssl" "pgrep")
     local missing_deps=()
 
     for dep in "${dependencies[@]}"; do
@@ -519,6 +524,13 @@ install_dependencies() {
                     packages+=("xz-utils")
                 else
                     packages+=("xz")
+                fi
+                ;;
+            pgrep)
+                if [[ "$os_type" == "ubuntu" || "$os_type" == "debian" ]]; then
+                    packages+=("procps")
+                else
+                    packages+=("procps-ng")
                 fi
                 ;;
             *) packages+=("$dep") ;;
@@ -684,6 +696,9 @@ generate_config() {
             if [[ "$port" =~ ^[1-9][0-9]{0,4}$ && "$port" -le $MAX_PORT ]]; then
                 if ( check_port_available "$port" 2>/dev/null ); then
                     break
+                else
+                    local port_status=$?
+                    [[ "$port_status" -ne 3 ]] || error "无法查询 TCP/UDP 监听状态，请检查 ss 或 netstat。" 3
                 fi
                 warn "端口 ${port} 已被占用，请换一个端口。"
             else
@@ -761,6 +776,15 @@ EOF
     success "Systemd 服务已创建并设为开机自启。"
 }
 
+service_main_pid() {
+    local pid exe
+    pid=$(systemctl show ss-rust --property=MainPID --value) || return 1
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    exe=$(readlink "/proc/$pid/exe") || return 1
+    [[ "$exe" == "$BINARY_PATH" || "$exe" == "$BINARY_PATH (deleted)" ]] || return 1
+    printf '%s\n' "$pid"
+}
+
 manage_service() {
     if ! command -v systemctl &> /dev/null; then
         error "未找到 systemd，无法管理服务。"
@@ -775,13 +799,26 @@ manage_service() {
             if systemctl "$1" ss-rust; then
                 success "$1 命令执行成功"
                 if [[ "$1" == "start" || "$1" == "restart" ]]; then
-                    local attempt
+                    local attempt pid='' observed_pid stable=false
                     for ((attempt=1; attempt<=SERVICE_START_ATTEMPTS; attempt++)); do
-                        systemctl is-active --quiet ss-rust && break
+                        if systemctl is-active --quiet ss-rust && pid=$(service_main_pid); then
+                            stable=true
+                            break
+                        fi
                         sleep "$SERVICE_START_WAIT"
                     done
-                    if systemctl is-active --quiet ss-rust; then
-                        success "服务运行正常"
+                    # Type=simple 的 active 不是就绪通知；确认同一真实主进程持续存活。
+                    if [[ "$stable" == true ]]; then
+                        for ((attempt=1; attempt<=SERVICE_START_ATTEMPTS; attempt++)); do
+                            sleep "$SERVICE_START_WAIT"
+                            if ! systemctl is-active --quiet ss-rust || ! observed_pid=$(service_main_pid) || [[ "$observed_pid" != "$pid" ]]; then
+                                stable=false
+                                break
+                            fi
+                        done
+                    fi
+                    if [[ "$stable" == true ]]; then
+                        success "服务主进程持续运行"
                     else
                         warn "服务启动失败，请检查配置或查看日志"
                         journalctl -u ss-rust --no-pager -n 20 >&2 || true
@@ -804,6 +841,64 @@ manage_service() {
     esac
 }
 
+# 只处理安装路径对应的进程，不按名称盲目 pkill（名称可被其他程序复用）。
+ss_rust_pids() {
+    local candidates status pid exe
+    if candidates=$(pgrep -x 'ss-rust|ssserver'); then
+        :
+    else
+        status=$?
+        [[ $status -eq 1 ]] && return 0
+        return 2
+    fi
+    for pid in $candidates; do
+        [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
+        if ! exe=$(readlink "/proc/$pid/exe"); then
+            [[ ! -d "/proc/$pid" ]] && continue
+            return 2
+        fi
+        if [[ "$exe" == "$BINARY_PATH" || "$exe" == "$BINARY_PATH (deleted)" ]]; then
+            printf '%s\n' "$pid"
+        fi
+    done
+}
+
+stop_residual_processes() {
+    local pids pid exe attempt
+    pids=$(ss_rust_pids) || return 1
+    for pid in $pids; do
+        # 信号发出前再次确认身份，避免将同名的其他程序终止。
+        if ! exe=$(readlink "/proc/$pid/exe"); then
+            [[ ! -d "/proc/$pid" ]] && continue
+            return 1
+        fi
+        [[ "$exe" == "$BINARY_PATH" || "$exe" == "$BINARY_PATH (deleted)" ]] || continue
+        if ! kill -TERM "$pid"; then
+            [[ ! -d "/proc/$pid" ]] || return 1
+        fi
+    done
+    for ((attempt=1; attempt<=SERVICE_START_ATTEMPTS; attempt++)); do
+        pids=$(ss_rust_pids) || return 1
+        [[ -z "$pids" ]] && return 0
+        sleep "$SERVICE_START_WAIT"
+    done
+    return 1
+}
+
+has_installation_residue() {
+    [[ -e "$BINARY_PATH" || -d "$INSTALL_DIR" || -e "$SYSTEMD_SERVICE_FILE" ||
+       -d "${SYSTEMD_SERVICE_FILE}.d" ]] && return 0
+    # 安装入口允许先补依赖；卸载入口无法检查时必须进入流程并明确失败。
+    if ! command -v pgrep >/dev/null 2>&1; then
+        [[ "${1:-}" != install ]]
+        return
+    fi
+    local pids
+    # 检查失败也进入卸载流程，在删除文件前明确报错。
+    pids=$(ss_rust_pids) || return 0
+    [[ -n "$pids" ]]
+}
+
 run_uninstall_logic() {
     info "正在卸载 shadowsocks-rust..."
     
@@ -812,34 +907,27 @@ run_uninstall_logic() {
         if [[ -f "$SYSTEMD_SERVICE_FILE" ]] || systemctl is-enabled --quiet ss-rust 2>/dev/null || systemctl is-active --quiet ss-rust 2>/dev/null; then
             info "正在停止并禁用服务..."
             if ! systemctl stop ss-rust &>/dev/null; then
-                if [[ ! -f "$SYSTEMD_SERVICE_FILE" ]]; then
-                    # 服务文件缺失（可能被手动删除），直接终止残留进程
-                    warn "服务文件缺失，正在直接终止 ss-rust 进程..."
-                    pkill -x ss-rust &>/dev/null || true
-                else
-                    error "无法停止 ss-rust 服务，已中止卸载。"
-                fi
-            fi
-            if systemctl is-active --quiet ss-rust 2>/dev/null; then
-                pkill -x ss-rust &>/dev/null || true
-                if systemctl is-active --quiet ss-rust 2>/dev/null; then
-                    error "ss-rust 服务仍在运行，已中止卸载。"
-                fi
+                [[ ! -f "$SYSTEMD_SERVICE_FILE" ]] || error "无法停止 ss-rust 服务，已中止卸载。"
             fi
             systemctl disable ss-rust &>/dev/null || error "无法禁用服务，已中止卸载。"
         fi
+    fi
+    # 无论 unit 是否存在/活跃，都独立检查并验证外部残留进程。
+    stop_residual_processes || error "无法确认 ss-rust 残留进程已停止，已中止卸载。"
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet ss-rust 2>/dev/null; then
+        error "ss-rust 服务仍在运行，已中止卸载。"
     fi
 
     # 删除所有相关文件、配置和临时备份
     info "正在删除所有相关文件和配置..."
     rm -f "$BINARY_PATH" "$SYSTEMD_SERVICE_FILE" || error "删除程序或服务失败。"
     rm -rf "$INSTALL_DIR" || error "删除配置失败。"
+    cleanup_uninstall_residue || error "清理卸载残留失败。"
 
     if command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload || error "systemd 重载失败。"
         systemctl reset-failed ss-rust >/dev/null 2>&1 || true
     fi
-    cleanup_uninstall_residue || error "清理卸载残留失败。"
 
     success "卸载完成；恢复目录不自动删除。"
 }
@@ -849,6 +937,10 @@ install_flow() {
     local os_type arch
 
     check_systemd
+    # 重建 unit 时不继承未纳入快照的用户覆盖；已有完整安装继续保留原 unit/drop-in。
+    if [[ ( ! -f "$SYSTEMD_SERVICE_FILE" || ! -f "$BINARY_PATH" ) && -d "${SYSTEMD_SERVICE_FILE}.d" ]]; then
+        error "检测到残留的 systemd drop-in，请先备份并卸载或手动处理后重试。"
+    fi
     os_type=$(detect_os) || error "检测系统失败。"
     check_dependencies "$os_type" || error "检查依赖失败。"
     arch=$(detect_arch) || error "检测架构失败。"
@@ -864,11 +956,8 @@ install_flow() {
             info "正在暂时停止旧服务，以安全替换程序..."
             systemctl stop ss-rust || error "无法停止旧服务，已中止操作。"
         fi
-    elif pgrep -x ss-rust >/dev/null 2>&1; then
-        # 服务文件缺失但进程仍在运行（异常残留），直接终止
-        warn "检测到残留的 ss-rust 进程（服务文件缺失），正在终止..."
-        pkill -x ss-rust || error "无法终止残留的 ss-rust 进程，已中止操作。"
     fi
+    stop_residual_processes || error "无法确认残留的 ss-rust 进程已停止，已中止操作。"
     version=${version:-$(get_latest_version)} || error "获取版本失败。"
     download_and_install "$version" "$arch" || error "安装程序失败。"
 
@@ -946,7 +1035,7 @@ do_update() {
 }
 
 do_uninstall() {
-    if [[ ! -f "$BINARY_PATH" && ! -d "$INSTALL_DIR" && ! -f "$SYSTEMD_SERVICE_FILE" ]]; then
+    if ! has_installation_residue; then
         warn "未发现任何 shadowsocks-rust 相关文件，无需卸载。"
         return
     fi
@@ -963,7 +1052,7 @@ do_uninstall() {
 
 load_config() {
     [[ -f "$CONFIG_PATH" ]] || error "找不到配置文件，请先执行安装。"
-    jq -cer 'if type == "object" and (.server_port|type)=="number" and (.server_port|floor)==.server_port and (.password|type)=="string" and (.method|type)=="string" then [.server_port, .password, .method] | @tsv else error("invalid config") end' "$CONFIG_PATH" 2>/dev/null ||
+    jq -ser 'if length != 1 then error("expected one config") else .[0] end | if type == "object" and (.server_port|type)=="number" and (.server_port|floor)==.server_port and (.password|type)=="string" and (.method|type)=="string" then [.server_port, .password, .method] | @tsv else error("invalid config") end' "$CONFIG_PATH" 2>/dev/null ||
         error "配置文件格式错误，无法读取必要信息。"
 }
 
@@ -1006,9 +1095,15 @@ do_modify_config() {
         read -r -p " -> 新端口 [${MIN_PORT}-${MAX_PORT}] (当前: ${current_port}): " new_port < /dev/tty || error "输入已终止。"
         new_port=${new_port:-$current_port}
         if [[ "$new_port" =~ ^[1-9][0-9]{0,4}$ && "$new_port" -le $MAX_PORT ]]; then
-            if [[ "$new_port" != "$current_port" ]] && ! ( check_port_available "$new_port" 2>/dev/null ); then
-                warn "端口 ${new_port} 已被占用，请换一个端口。"
-                continue
+            if [[ "$new_port" != "$current_port" ]]; then
+                if ( check_port_available "$new_port" 2>/dev/null ); then
+                    :
+                else
+                    local port_status=$?
+                    [[ "$port_status" -ne 3 ]] || error "无法查询 TCP/UDP 监听状态，请检查 ss 或 netstat。" 3
+                    warn "端口 ${new_port} 已被占用，请换一个端口。"
+                    continue
+                fi
             fi
             break
         else
@@ -1072,13 +1167,12 @@ generate_ss_url() {
     local password="$3"
     local method="$4"
     local node_name="$5"
-    local encoded_userinfo encoded_name
-
-    encoded_userinfo=$(printf '%s:%s' "$method" "$password" |
-        base64 | tr '+/' '-_' | tr -d '=\n') || return 1
+    local encoded_method encoded_password encoded_name
+    encoded_method=$(printf '%s' "$method" | jq -sRr @uri) || return 1
+    encoded_password=$(printf '%s' "$password" | jq -sRr @uri) || return 1
     encoded_name=$(printf '%s' "$node_name" | jq -sRr @uri) || return 1
-    printf 'ss://%s@%s:%s#%s\n' \
-        "$encoded_userinfo" "$ip_address" "$port" "$encoded_name"
+    printf 'ss://%s:%s@%s:%s#%s\n' \
+        "$encoded_method" "$encoded_password" "$ip_address" "$port" "$encoded_name"
 }
 
 # shellcheck disable=SC2120
@@ -1257,7 +1351,7 @@ EOF
                 if [[ -z "${2:-}" || "$2" =~ ^- ]]; then
                     error "参数 $1 需要指定加密方式" 2
                 fi
-                get_key_bytes "$2" >/dev/null
+                (get_key_bytes "$2") >/dev/null 2>&1 || error "不支持的加密方式: $2" 2
                 ss_method="$2"
                 shift 2
                 ;;
@@ -1287,8 +1381,8 @@ EOF
         
         validate_password "$ss_password" "$(get_key_bytes "$ss_method")"
 
-        # 检查是否已安装或存在残留（程序/配置/服务文件任一存在都视为已安装）
-        if [[ -f "$BINARY_PATH" || -f "$CONFIG_PATH" || -f "$SYSTEMD_SERVICE_FILE" ]]; then
+        # 与菜单卸载共用残留判定，避免漏掉孤立 drop-in 或进程。
+        if has_installation_residue install; then
             error "检测到 shadowsocks-rust 已安装或存在残留文件，请先执行 --uninstall 清理后再安装。"
         fi
 
