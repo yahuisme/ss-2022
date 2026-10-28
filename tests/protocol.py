@@ -16,6 +16,16 @@ class Tests(unittest.TestCase):
    p=pathlib.Path(d)/'fixture.sh';p.write_text(SETUP+'\n'+'\n'.join(extract(n) for n in names)+'\n'+body)
    o=subprocess.run(['bash',str(p)],cwd=d,text=True,capture_output=True,timeout=15)
   self.assertEqual(o.returncode,0,o.stdout+o.stderr);return o
+ def test_help_and_argument_errors_never_reach_mutators(self):
+  for args,code in [('--help',0),('-h',0),('--help extra',2),('--uninstall extra',2),('--unknown',2),('--port',2),('--password',2),('--method',2),('--port 8388',2)]:
+   with self.subTest(args=args):
+    self.run_shell(['main','get_key_bytes'],r'''
+check_root() { :; }
+init_temp_dir() { :; }
+install_flow() { touch mutation; exit 81; }
+run_uninstall_logic() { touch mutation; exit 81; }
+main_menu() { touch mutation; exit 81; }
+''' + f'if (main {args}); then rc=0; else rc=$?; fi\n[[ $rc = {code} && ! -e mutation ]]\n')
  def test_cli_residue_guard(self):
   key=base64.b64encode(bytes(16)).decode()
   self.run_shell(['main','get_key_bytes','has_installation_residue'],f'''
@@ -44,13 +54,84 @@ ss_rust_pids() { return 2; }
 if has_installation_residue install; then exit 80; fi
 has_installation_residue || exit 80
 ''')
- def test_pgrep_dependency_mapping(self):
-  for os_type,package in [('debian','procps'),('centos','procps-ng')]:
+ def test_pgrep_and_ss_dependency_mapping(self):
+  for os_type,package in [('debian','procps'),('centos','procps-ng'),('debian','iproute2'),('centos','iproute')]:
    o=self.run_shell(['install_dependencies'],f'''apt-get() {{ printf '%s\\n' "$*"; }}
 yum() {{ printf '%s\\n' "$*"; }}
-install_dependencies {os_type} pgrep
+install_dependencies {os_type} {'pgrep' if package.startswith('procps') else 'ss'}
 ''')
    self.assertIn(package,o.stdout)
+ def test_socket_dependency_added_only_when_both_tools_missing(self):
+  self.run_shell(['check_dependencies','install_dependencies'],r'''
+command() {
+ if [[ "$1" = -v && ( "$2" = ss || "$2" = netstat ) ]]; then return 1; fi
+ if [[ "$1" = -v ]]; then return 0; fi
+ builtin command "$@"
+}
+apt-get() { printf '%s\\n' "$*"; }
+non_interactive=true
+check_dependencies debian | grep -F -- 'iproute2'
+''')
+ def test_socket_dependency_not_added_when_netstat_exists(self):
+  self.run_shell(['check_dependencies','install_dependencies'],r'''
+command() {
+ if [[ "$1" = -v && "$2" = ss ]]; then return 1; fi
+ if [[ "$1" = -v && "$2" = netstat ]]; then return 0; fi
+ if [[ "$1" = -v ]]; then return 0; fi
+ builtin command "$@"
+}
+apt-get() { printf '%s\\n' "$*"; }
+non_interactive=true
+check_dependencies debian
+! grep -F -- 'iproute2' <<< "$(check_dependencies debian)"
+''')
+ def test_ipv4_lookup_uses_shared_validator(self):
+  start=SRC.index('get_public_ip() {')
+  end=SRC.index('\ndetect_os() {',start)
+  body=SRC[start:end]
+  self.assertIn('https://api6.ipify.org',body)
+  self.assertNotIn('https://api64.ipify.org',body)
+  self.assertIn('validate_ipv4 "$ip"',body)
+  self.assertNotIn('local valid=true',body)
+  self.assertNotIn('IFS=. read -ra octets',body)
+ def test_public_ip_ipv6_endpoint_and_fallback(self):
+  o=self.run_shell(['validate_ipv4','validate_ipv6','get_public_ip'],r'''
+mkdir -p "$INSTALL_DIR"
+safe_curl() {
+ case "$1" in
+  https://api.ipify.org|https://ip.sb) return 1;;
+  https://api6.ipify.org) printf '2001:db8::1\n';;
+  *) return 1;;
+ esac
+}
+result=$(get_public_ip)
+[[ "$result" = '[2001:db8::1]' ]]
+''')
+  self.assertNotIn('api64.ipify.org',o.stdout)
+ def test_public_ip_cache_ttl_and_write_failures_are_nonfatal(self):
+  self.run_shell(['validate_ipv4','validate_ipv6','get_public_ip'],r'''
+mkdir -p "$INSTALL_DIR"
+printf '203.0.113.10\n' > "$INSTALL_DIR/.public-ip"
+result=$(get_public_ip)
+[[ "$result" = 203.0.113.10 ]]
+touch -d '2 days ago' "$INSTALL_DIR/.public-ip"
+safe_curl() { [[ "$1" = https://api.ipify.org ]] && printf '198.51.100.7\n' || return 1; }
+result=$(get_public_ip)
+[[ "$result" = 198.51.100.7 ]]
+rm -f "$INSTALL_DIR/.public-ip"
+mkdir "$INSTALL_DIR/.public-ip"
+result=$(get_public_ip)
+[[ "$result" = 198.51.100.7 ]]
+''')
+ def test_public_ip_missing_cache_directory_and_total_failure(self):
+  self.run_shell(['validate_ipv4','validate_ipv6','get_public_ip'],r'''
+safe_curl() { [[ "$1" = https://api.ipify.org ]] && printf '198.51.100.8\n' || return 1; }
+result=$(get_public_ip)
+[[ "$result" = 198.51.100.8 ]]
+rm -rf "$INSTALL_DIR"
+safe_curl() { return 1; }
+if get_public_ip; then exit 80; fi
+''')
  def test_modify_port_probe_failure_aborts(self):
   self.run_shell(['do_modify_config'],r'''
 load_config() { printf '8388\tAAAAAAAAAAAAAAAAAAAAAA==\t2022-blake3-aes-128-gcm\n'; }

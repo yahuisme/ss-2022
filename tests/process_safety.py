@@ -18,8 +18,100 @@ readlink() { return 99; }
    p=pathlib.Path(d)/'test.sh';p.write_text(setup+'\n'+'\n'.join(extract(n) for n in names)+'\n'+body)
    r=subprocess.run(['bash',str(p)],cwd=d,capture_output=True,text=True,timeout=10)
    self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+ def test_mainpid_legacy_output(self):
+  self.run_case(['service_main_pid'], '''
+systemctl() { [[ "$*" != *--value* ]] || return 1; printf 'MainPID=12\\n'; }
+readlink() { printf '%s\\n' "$BINARY_PATH"; }
+[[ $(service_main_pid) = 12 ]]
+for reply in MainPID=0 MainPID=bad Other=12 $'MainPID=12\\nMainPID=13'; do
+ systemctl() { printf '%s\\n' "$reply"; }
+ if service_main_pid; then exit 80; fi
+done
+''')
+ def test_restore_does_not_restart_mixed_installation(self):
+  for fault in ('copy', 'reload', 'stop'):
+   self.run_case(['restore_install_state'], 'FAULT=' + fault + '''
+mkdir -p "$TMP_DIR" "$INSTALL_DIR"
+BACKUP_ACTIVE=true
+touch "$TMP_DIR/was-active" "$TMP_DIR/was-enabled"
+for n in binary version config service; do printf 'old-%s' "$n" > "$TMP_DIR/old-$n"; done
+for p in "$BINARY_PATH" "$VERSION_FILE" "$CONFIG_PATH" "$SYSTEMD_SERVICE_FILE"; do printf new > "$p"; done
+cp() { if [[ "$FAULT" = copy && "$*" = *old-config* ]]; then return 1; fi; command cp "$@"; }
+systemctl() {
+ case "$1" in
+ stop) touch stopped; [[ "$FAULT" != stop ]];;
+ daemon-reload) [[ "$FAULT" != reload ]];;
+ restart|start) touch restarted;;
+ *) return 0;;
+ esac
+}
+if restore_install_state; then exit 80; fi
+[[ -e stopped && ! -e restarted ]]
+if [[ "$FAULT" = stop ]]; then [[ $(cat "$BINARY_PATH") = new ]]; fi
+''')
+ def test_enablement_scope_is_preserved(self):
+  for state in ('enabled', 'enabled-runtime', 'disabled', 'static', 'indirect', 'masked', 'masked-runtime', 'linked'):
+   self.run_case(['backup_install_state', 'restore_install_state'], 'ORIGINAL=' + state + '''
+mkdir -p "$TMP_DIR" "$INSTALL_DIR"
+BACKUP_ACTIVE=false INSTALL_COMMITTED=false
+for p in "$BINARY_PATH" "$VERSION_FILE" "$CONFIG_PATH" "$SYSTEMD_SERVICE_FILE"; do printf old > "$p"; done
+printf '%s' "$ORIGINAL" > enabled-state
+systemctl() {
+ case "$1" in
+ is-active) return 1;;
+ is-enabled) cat enabled-state; [[ $(cat enabled-state) != disabled ]];;
+ enable) if [[ "$*" = *--runtime* ]]; then printf enabled-runtime > enabled-state; else printf enabled > enabled-state; fi;;
+ disable) printf disabled > enabled-state;;
+ stop|daemon-reload) return 0;;
+ *) return 99;;
+ esac
+}
+backup_install_state
+restore_install_state
+[[ $(cat enabled-state) = "$ORIGINAL" ]]
+''')
+ def test_low_ports_require_ambient_capability_support(self):
+  self.run_case(['check_service_port'], '''
+systemctl() { printf 'systemd 219\\n+PAM\\n'; }
+check_service_port 8388
+if (check_service_port 443); then exit 80; fi
+systemctl() { printf 'systemd 229\\n'; }
+check_service_port 443
+printf 'User=root\\n' > "$SYSTEMD_SERVICE_FILE"
+systemctl() { if [[ "$1" = show ]]; then cat "$SYSTEMD_SERVICE_FILE"; else printf 'systemd 219\\n'; fi; }
+check_service_port 443
+printf 'User=nobody\\n' > "$SYSTEMD_SERVICE_FILE"
+if (check_service_port 443); then exit 80; fi
+''')
+ def test_write_config_rejects_unsupported_low_port_before_mutation(self):
+  self.run_case(['check_service_port', 'write_config'], '''
+mkdir -p "$INSTALL_DIR"
+printf '{"server_port":8388,"password":"old","method":"old"}' > "$CONFIG_PATH"
+cp "$CONFIG_PATH" expected
+systemctl() { printf 'systemd 219\\n'; }
+if (write_config 443 key method); then exit 80; fi
+cmp expected "$CONFIG_PATH"
+[[ -z $(compgen -G "$CONFIG_PATH.tmp.*") ]]
+''')
+ def test_rebuilding_unit_keeps_existing_enablement(self):
+  self.run_case(['create_systemd_service'], '''
+mkdir -p "$TMP_DIR"
+touch "$TMP_DIR/old-service"
+systemctl() { if [[ "$1" = enable ]]; then touch enabled; fi; }
+create_systemd_service
+[[ -f "$SYSTEMD_SERVICE_FILE" && ! -e enabled ]]
+''')
+ def test_failed_enablement_query_aborts_before_transaction(self):
+  self.run_case(['backup_install_state'], '''
+mkdir -p "$TMP_DIR" "$INSTALL_DIR"
+touch "$SYSTEMD_SERVICE_FILE"
+BACKUP_ACTIVE=false INSTALL_COMMITTED=false
+systemctl() { if [[ "$1" = is-enabled ]]; then printf unknown; return 2; fi; return 1; }
+if (backup_install_state); then exit 80; fi
+[[ "$BACKUP_ACTIVE" = false && ! -e "$TMP_DIR/was-enabled" ]]
+''')
  def test_mainpid_identity(self):
-  self.run_case(['service_main_pid'],'''systemctl() { printf '12\\n'; }; readlink() { printf '%s\\n' "$BINARY_PATH"; }; [[ $(service_main_pid) == 12 ]]
+  self.run_case(['service_main_pid'],'''systemctl() { printf 'MainPID=12\\n'; }; readlink() { printf '%s\\n' "$BINARY_PATH"; }; [[ $(service_main_pid) == 12 ]]
 readlink() { printf '%s (deleted)\\n' "$BINARY_PATH"; }; [[ $(service_main_pid) == 12 ]]
 readlink() { printf '/foreign\\n'; }; if service_main_pid; then exit 80; fi
 systemctl() { printf '0\\n'; }; if service_main_pid; then exit 80; fi
@@ -62,7 +154,7 @@ if stop_residual_processes; then exit 80; fi
 ''')
  def test_pid_change_rejects_start(self):
   self.run_case(['service_main_pid','manage_service'],'''touch "$SYSTEMD_SERVICE_FILE"
-systemctl() { if [[ "$1" == show ]]; then if [[ -e "$RUN/seen" ]]; then printf '13\\n'; else : > "$RUN/seen"; printf '12\\n'; fi; else return 0; fi; }
+systemctl() { if [[ "$1" == show ]]; then if [[ -e "$RUN/seen" ]]; then printf 'MainPID=13\\n'; else : > "$RUN/seen"; printf 'MainPID=12\\n'; fi; else return 0; fi; }
 readlink() { printf '%s' "$BINARY_PATH"; }
 if (manage_service restart); then exit 80; else [[ $? == 1 ]]; fi
 [[ -f "$RUN/seen" ]]

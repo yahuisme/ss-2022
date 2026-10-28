@@ -31,8 +31,8 @@ systemctl() {
      [[ $n -le 2 ]]
    elif [[ "$CASE" == inactive_after_restart ]]; then return 3
    else [[ -f "$RUN/active" ]]; fi ;;
- show) printf "4242\n" ;;
- is-enabled) [[ -f "$RUN/enabled" ]] ;;
+ show) printf "MainPID=4242\n" ;;
+ is-enabled) if [[ -f "$RUN/enabled" ]]; then printf 'enabled\n'; else printf 'disabled\n'; return 1; fi ;;
  stop) [[ "$CASE" != fresh_stop_failure ]] || return 1; command rm -f "$RUN/active" ;;
  disable) command rm -f "$RUN/enabled" ;;
  enable) : > "$RUN/enabled" ;;
@@ -55,6 +55,7 @@ apt-get() { printf 'FORBIDDEN apt\n' >&2; exit 99; }
 yum() { exit 99; }; curl() { exit 99; }; wget() { exit 99; }
 detect_os() { printf debian; }; detect_arch() { printf aarch64; }
 check_dependencies() { :; }; get_latest_version() { printf 2.0.0; }
+prepare_download() { printf 'prepare\n' >> "$RUN/actions.log"; [[ "$CASE" != download_failure ]]; }
 validate_version() { :; }; check_port_available() { :; }; view_config() { :; }
 download_and_install() {
  printf 'download\n' >> "$RUN/actions.log"
@@ -82,6 +83,9 @@ case "$CASE" in
  transient_active|inactive_after_restart|wrong_main)
  ( trap 'on_exit' EXIT; manage_service restart ) || true
  if systemctl is-active --quiet ss-rust; then printf 'POSTCHECK_ACTIVE\n'; else printf 'POSTCHECK_INACTIVE\n'; fi ;;
+ stopped_stale_unit)
+ command rm -f "$BINARY_PATH"
+ ( trap 'on_exit' EXIT; install_flow true 8388 AAAAAAAAAAAAAAAAAAAAAA== "$DEFAULT_ENCRYPTION_METHOD" 2.0.0 ) || true ;;
  stopped_update)
  ( trap 'on_exit' EXIT; do_update ) || true ;;
  backup_failure|download_failure|restart_failure|restore_failure|mode_rollback)

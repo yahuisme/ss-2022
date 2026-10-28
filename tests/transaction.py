@@ -59,6 +59,13 @@ def retained_units():
  assert (r/'system/ss-rust.service').read_bytes()==(r/'tmp/old-service').read_bytes()
  assert (r/'active').exists()
 
+def stopped_stale_unit():
+ r,p=run('stopped_stale_unit',active=False)
+ assert (r/'bin/ss-rust').read_text()=='NEW_BINARY\n'
+ assert (r/'system/ss-rust.service').exists()
+ assert not (r/'active').exists(),'rebuilding stopped stale unit started service'
+ assert not (r/'enabled').exists(),'rebuilding stopped stale unit changed enablement'
+
 def stability():
  r,p=run('transient_active')
  assert '服务运行正常' not in p.stderr,'transient active was reported healthy'
@@ -78,6 +85,9 @@ def regressions():
   if case in ['backup_failure','download_failure','restart_failure','modify_restart_failure']:
    assert (r/'config/config.json').read_text()==json.dumps(config),(case,p.stderr)
    assert (r/'active').exists(),case
+  if case=='restore_failure':
+   assert not (r/'active').exists(),'incomplete file recovery restarted a mixed installation'
+   assert (r/'systemctl.log').read_text().splitlines().count('restart ss-rust')==1
   if case=='repeated':
    assert not (r/'config/config.json').exists()
    assert (r/'bin/ss-rust').read_text()=='NEW_BINARY\n'
@@ -103,6 +113,6 @@ def regressions():
  assert not (r/'orphan').exists()
 
 if __name__=='__main__':
- for name in (sys.argv[1:] or ['metadata','orphan','dropin','retained_units','stability','install_process_safety','regressions']):
+ for name in (sys.argv[1:] or ['metadata','orphan','dropin','retained_units','stopped_stale_unit','stability','install_process_safety','regressions']):
   globals()[name](); print('PASS',name)
  print('PASS',len(set(CASES)),'unique transaction scenarios')

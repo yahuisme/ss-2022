@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.09.27"
+readonly SCRIPT_VERSION="26.10.28"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -67,10 +67,14 @@ INSTALL_COMMITTED=false
 restore_install_state() {
     [[ "$BACKUP_ACTIVE" == true ]] || return 0
     local failed=false name target staged
-    # 首次安装失败：先停止并禁用新服务，避免删除 unit 后遗留运行进程。
-    if [[ ! -f "${TMP_DIR}/old-service" && -f "$SYSTEMD_SERVICE_FILE" ]]; then
-        if ! systemctl stop ss-rust || ! systemctl disable ss-rust; then
-            warn "无法停止或禁用新服务，请手动恢复: $TMP_DIR"
+    # 先停止当前进程，再恢复文件；无法停止时不替换运行中的安装。
+    if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then
+        if ! systemctl stop ss-rust; then
+            warn "无法停止服务，请手动恢复: $TMP_DIR"
+            return 1
+        fi
+        if [[ ! -f "${TMP_DIR}/old-service" ]] && ! systemctl disable ss-rust; then
+            warn "无法禁用新服务，请手动恢复: $TMP_DIR"
             return 1
         fi
     fi
@@ -94,12 +98,14 @@ restore_install_state() {
     done
     if command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload || failed=true
-        if [[ -f "${TMP_DIR}/was-enabled" ]]; then
+        if [[ -f "${TMP_DIR}/was-enabled-runtime" ]]; then
+            systemctl enable --runtime ss-rust || failed=true
+        elif [[ -f "${TMP_DIR}/was-enabled" ]]; then
             systemctl enable ss-rust || failed=true
         elif [[ -f "${TMP_DIR}/was-disabled" ]]; then
             systemctl disable ss-rust || failed=true
         fi
-        if [[ -f "${TMP_DIR}/old-service" ]]; then
+        if [[ "$failed" = false && -f "${TMP_DIR}/old-service" ]]; then
             if [[ -f "${TMP_DIR}/was-active" ]]; then
                 systemctl restart ss-rust && systemctl is-active --quiet ss-rust || failed=true
             else
@@ -138,7 +144,7 @@ backup_install_state() {
         error "有未恢复的备份，请先处理: $TMP_DIR"
     fi
     mkdir -p "$TMP_DIR" || error "创建临时目录失败。"
-    rm -f "${TMP_DIR}/old-"{binary,version,config,service} "${TMP_DIR}/was-"{active,enabled,disabled} || error "清理旧快照失败。"
+    rm -f "${TMP_DIR}/old-"{binary,version,config,service} "${TMP_DIR}/was-"{active,enabled,enabled-runtime,disabled} || error "清理旧快照失败。"
     if [[ -f "$BINARY_PATH" ]]; then cp -p "$BINARY_PATH" "${TMP_DIR}/old-binary" || error "备份旧程序失败，已中止操作。"; fi
     if [[ -f "$VERSION_FILE" ]]; then cp -p "$VERSION_FILE" "${TMP_DIR}/old-version" || error "备份版本文件失败，已中止操作。"; fi
     if [[ -f "$CONFIG_PATH" ]]; then cp -p "$CONFIG_PATH" "${TMP_DIR}/old-config" || error "备份配置文件失败，已中止操作。"; fi
@@ -146,12 +152,17 @@ backup_install_state() {
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet ss-rust 2>/dev/null; then
         : > "${TMP_DIR}/was-active" || error "保存服务状态失败。"
     fi
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl is-enabled --quiet ss-rust 2>/dev/null; then
-            : > "${TMP_DIR}/was-enabled" || error "保存服务状态失败。"
-        else
-            : > "${TMP_DIR}/was-disabled" || error "保存服务状态失败。"
-        fi
+    if [[ -f "$SYSTEMD_SERVICE_FILE" ]] && command -v systemctl >/dev/null 2>&1; then
+        local enabled_state
+        enabled_state=$(systemctl is-enabled ss-rust 2>/dev/null) || {
+            [[ $? = 1 ]] || error "读取服务自启状态失败。"
+        }
+        case "$enabled_state" in
+            enabled|enabled-runtime|disabled)
+                : > "${TMP_DIR}/was-$enabled_state" || error "保存服务状态失败。" ;;
+            static|indirect|alias|generated|transient|linked|linked-runtime|masked|masked-runtime) : ;;
+            *) error "无法识别服务自启状态。" ;;
+        esac
     fi
     BACKUP_ACTIVE=true
 }
@@ -281,6 +292,18 @@ validate_port() {
     # 拒绝前导 0 与 0 本身：避免 bash 八进制解析歧义，且端口应无前导零
     [[ "$port" =~ ^[1-9][0-9]{0,4}$ && "$port" -le "$MAX_PORT" ]] ||
         error "端口 $port 无效，必须在 ${MIN_PORT}-${MAX_PORT} 范围内。"
+}
+
+check_service_port() {
+    local port="$1" version user
+    (( port < 1024 )) || return 0
+    if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then
+        user=$(systemctl show ss-rust --property=User) || error "无法读取服务用户。"
+        [[ "$user" != User= && "$user" != User=root ]] || return 0
+    fi
+    version=$(systemctl --version) || error "无法读取 systemd 版本。"
+    [[ "$version" =~ ^systemd[[:space:]]+([0-9]+) ]] || error "无法识别 systemd 版本。"
+    (( BASH_REMATCH[1] >= 229 )) || error "当前 systemd 不支持非特权用户监听低端口，请使用 1024-65535 端口。"
 }
 
 validate_version() {
@@ -422,23 +445,16 @@ get_public_ip() {
     info "正在查询公网IP地址..."
     local ip=""
     local ipv4_services=("https://api.ipify.org" "https://ip.sb")
-    local ipv6_services=("https://api64.ipify.org" "https://ipv6.ip.sb")
+    local ipv6_services=("https://api6.ipify.org" "https://ipv6.ip.sb")
     
     # 优先尝试获取 IPv4
     for service in "${ipv4_services[@]}"; do
         if ip=$(safe_curl "$service" | tr -d '[:space:]'); then
-            if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
-                local valid=true octet
-                IFS=. read -ra octets <<< "$ip"
-                for octet in "${octets[@]}"; do
-                    [[ $((10#$octet)) -le 255 ]] || valid=false
-                done
-                if [[ "$valid" == true ]]; then
-                    echo "$ip"
-                    { [[ -d "${INSTALL_DIR}" ]] && printf '%s\n' "$ip" 2>/dev/null > "${INSTALL_DIR}/.public-ip"; } || true
-                    success "成功获取公网 IPv4 地址。"
-                    return 0
-                fi
+            if validate_ipv4 "$ip"; then
+                echo "$ip"
+                { [[ -d "${INSTALL_DIR}" ]] && printf '%s\n' "$ip" 2>/dev/null > "${INSTALL_DIR}/.public-ip"; } || true
+                success "成功获取公网 IPv4 地址。"
+                return 0
             fi
         fi
     done
@@ -495,6 +511,12 @@ check_dependencies() {
         fi
     done
 
+    # ss and netstat are interchangeable for the port probe; install ss only
+    # when neither tool is available on a minimal system.
+    if ! command -v ss &>/dev/null && ! command -v netstat &>/dev/null; then
+        missing_deps+=("ss")
+    fi
+
     if [[ ${#missing_deps[@]} -gt 0 ]]; then
         warn "检测到以下依赖缺失: ${missing_deps[*]}"
         if [[ "${non_interactive:-false}" == "true" ]]; then
@@ -533,6 +555,13 @@ install_dependencies() {
                     packages+=("procps-ng")
                 fi
                 ;;
+            ss)
+                if [[ "$os_type" == "ubuntu" || "$os_type" == "debian" ]]; then
+                    packages+=("iproute2")
+                else
+                    packages+=("iproute")
+                fi
+                ;;
             *) packages+=("$dep") ;;
         esac
     done
@@ -569,12 +598,13 @@ get_latest_version() {
     echo "$latest_version"
 }
 
-download_and_install() {
-    local version="$1"
-    local arch="$2"
+prepare_download() {
+    local version="$1" arch="$2" extract_dir
+    PREPARED_BINARY=""
+    extract_dir=$(mktemp -d "${TMP_DIR}/release.XXXXXX") || error "创建下载目录失败。"
     local download_url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/v${version}/shadowsocks-v${version}.${arch}.tar.xz"
-    local download_path="${TMP_DIR}/ss-rust.tar.xz"
-    local checksum_path="${TMP_DIR}/ss-rust.tar.xz.sha256"
+    local download_path="${extract_dir}/ss-rust.tar.xz"
+    local checksum_path="${extract_dir}/ss-rust.tar.xz.sha256"
 
     info "正在下载 shadowsocks-rust v${version}..."
     
@@ -601,29 +631,40 @@ download_and_install() {
         error "下载文件 SHA-256 校验失败。"
     fi
 
-    info "正在解压并安装..."
-    if ! tar -xf "$download_path" -C "$TMP_DIR"; then
+    info "正在解压并验证程序..."
+    if ! tar -xf "$download_path" -C "$extract_dir" ssserver; then
         error "文件解压失败，可能下载文件已损坏。"
     fi
-
-    if [[ ! -f "${TMP_DIR}/ssserver" ]]; then
-        error "解压后未找到 ssserver 可执行文件。"
+    if [[ ! -f "${extract_dir}/ssserver" || -L "${extract_dir}/ssserver" ]]; then
+        error "解压后未找到 ssserver 普通文件。"
     fi
+    local actual_version
+    chmod 755 "${extract_dir}/ssserver" || error "设置程序权限失败。"
+    actual_version=$("${extract_dir}/ssserver" --version) || error "下载的程序无法运行。"
+    [[ "$actual_version" == "shadowsocks $version" ]] || error "下载的程序版本不符。"
+    PREPARED_BINARY="${extract_dir}/ssserver"
+}
 
+download_and_install() {
+    local version="$1"
+    [[ -n "${PREPARED_BINARY:-}" && -f "$PREPARED_BINARY" ]] || error "缺少已验证的程序。"
     # 先准备临时文件，再原子替换，避免写入中断留下损坏二进制。
     mkdir -p "$INSTALL_DIR" || error "创建安装目录失败。"
     local new_binary
     new_binary=$(mktemp "${BINARY_PATH}.new.XXXXXX") || error "创建临时文件失败。"
-    install -m 755 "${TMP_DIR}/ssserver" "$new_binary" || error "安装程序失败。"
-    mv -f "$new_binary" "$BINARY_PATH" || error "替换程序失败。"
+    if ! install -m 755 "$PREPARED_BINARY" "$new_binary" || ! mv -f "$new_binary" "$BINARY_PATH"; then
+        rm -f "$new_binary" || true
+        error "替换程序失败。"
+    fi
 
     # 创建版本文件
     local new_version
     new_version=$(mktemp "${VERSION_FILE}.new.XXXXXX") || error "创建临时文件失败。"
-    printf '%s\n' "$version" > "$new_version" || error "写入版本失败。"
-    chmod 644 "$new_version" || error "设置版本权限失败。"
-    chown root:root "$new_version" || error "设置版本所有者失败。"
-    mv -f "$new_version" "$VERSION_FILE" || error "替换版本失败。"
+    if ! printf '%s\n' "$version" > "$new_version" || ! chmod 644 "$new_version" ||
+       ! chown root:root "$new_version" || ! mv -f "$new_version" "$VERSION_FILE"; then
+        rm -f "$new_version" || true
+        error "写入版本失败。"
+    fi
 
     info "程序 v${version} 已写入。"
 }
@@ -634,13 +675,13 @@ write_config() {
     local password="$2"
     local method="$3"
     
+    # 低端口需要 systemd 的 ambient capability 支持；保留已有 root 服务。
+    (( port >= 1024 )) || check_service_port "$port"
     # 确保安装目录存在
     mkdir -p "$INSTALL_DIR" || error "创建安装目录失败。"
     
-    # 生成配置文件
+    # 校验原配置后再创建暂存文件，失败不遗留密钥文件。
     local tmp_config
-    tmp_config=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX") || error "创建临时文件失败。"
-
     local source=/dev/null
     local -a jq_mode=(-n)
     if [[ -f "$CONFIG_PATH" ]]; then
@@ -648,7 +689,8 @@ write_config() {
         source="$CONFIG_PATH"
         jq_mode=()
     fi
-    jq -e "${jq_mode[@]}" \
+    tmp_config=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX") || error "创建临时文件失败。"
+    if ! jq -e "${jq_mode[@]}" \
         --argjson server_port "$port" \
         --arg password "$password" \
         --arg method "$method" \
@@ -663,12 +705,11 @@ write_config() {
             "no_delay": true
         } elif type == "object" then . else error("invalid config") end
         | .server_port = $server_port | .password = $password | .method = $method' \
-        "$source" > "$tmp_config" || error "生成配置失败。"
-    
-    # 设置严格的文件权限（nobody 用户运行需可读；root 拥有）
-    chmod 644 "$tmp_config" || error "设置配置权限失败。"
-    chown root:root "$tmp_config" || error "设置配置所有者失败。"
-    mv -f "$tmp_config" "$CONFIG_PATH" || error "替换配置失败。"
+        "$source" > "$tmp_config" || ! chmod 644 "$tmp_config" ||
+        ! chown root:root "$tmp_config" || ! mv -f "$tmp_config" "$CONFIG_PATH"; then
+        rm -f "$tmp_config" || true
+        error "写入配置失败。"
+    fi
 }
 
 generate_config() {
@@ -770,16 +811,19 @@ EOF
     if ! systemctl daemon-reload; then
         error "systemd daemon-reload 失败。"
     fi
-    if ! systemctl enable ss-rust; then
-        error "ss-rust 服务设置开机自启失败。"
+    if [[ ! -f "${TMP_DIR}/old-service" ]]; then
+        systemctl enable ss-rust || error "ss-rust 服务设置开机自启失败。"
+        success "Systemd 服务已创建并设为开机自启。"
+    else
+        success "Systemd 服务已重建，保留原自启状态。"
     fi
-    success "Systemd 服务已创建并设为开机自启。"
 }
 
 service_main_pid() {
     local pid exe
-    pid=$(systemctl show ss-rust --property=MainPID --value) || return 1
-    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    pid=$(systemctl show ss-rust --property=MainPID) || return 1
+    [[ "$pid" =~ ^MainPID=([1-9][0-9]*)$ ]] || return 1
+    pid=${BASH_REMATCH[1]}
     exe=$(readlink "/proc/$pid/exe") || return 1
     [[ "$exe" == "$BINARY_PATH" || "$exe" == "$BINARY_PATH (deleted)" ]] || return 1
     printf '%s\n' "$pid"
@@ -944,6 +988,9 @@ install_flow() {
     os_type=$(detect_os) || error "检测系统失败。"
     check_dependencies "$os_type" || error "检查依赖失败。"
     arch=$(detect_arch) || error "检测架构失败。"
+    version=${version:-$(get_latest_version)} || error "获取版本失败。"
+    # 网络、校验、解压和可执行性检查完成后，才快照并停用现有服务。
+    prepare_download "$version" "$arch" || error "准备程序失败。"
     backup_install_state || error "备份失败。"
     # 残留处理：unit 存在但程序不存在（中断的卸载/手动删除残留）→ 移除旧 unit，让下方重建正式服务
     if [[ -f "$SYSTEMD_SERVICE_FILE" && ! -f "$BINARY_PATH" ]]; then
@@ -958,8 +1005,7 @@ install_flow() {
         fi
     fi
     stop_residual_processes || error "无法确认残留的 ss-rust 进程已停止，已中止操作。"
-    version=${version:-$(get_latest_version)} || error "获取版本失败。"
-    download_and_install "$version" "$arch" || error "安装程序失败。"
+    download_and_install "$version" || error "安装程序失败。"
 
     if [[ "$configure" == true ]]; then
         if [[ -n "$port" || -n "$password" ]]; then
@@ -972,8 +1018,8 @@ install_flow() {
     # 仅首次安装时创建服务并设为自启；更新/重装保留用户既有的 unit 与自启状态。
     if [[ ! -f "$SYSTEMD_SERVICE_FILE" ]]; then
         create_systemd_service || error "创建服务失败。"
-        manage_service "restart" || error "启动服务失败。"
-    elif [[ -f "${TMP_DIR}/was-active" ]]; then
+    fi
+    if [[ ! -f "${TMP_DIR}/old-service" || -f "${TMP_DIR}/was-active" ]]; then
         manage_service "restart" || error "启动服务失败。"
     else
         info "服务在操作前处于停止状态，完成后保持停止。"
