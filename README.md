@@ -22,6 +22,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/ss-2022/main/instal
 
 再次运行上方命令，按菜单更新、卸载、修改配置或查看链接，也可管理服务启停。
 
+- 安装时默认开启自动时间同步；已有时间服务直接复用，否则安装 chrony，并检查实际同步结果。同步失败会中止安装，不停止原有代理服务。
+- 菜单 `10` 可单独开启自动时间同步并检查结果；保留系统原有时间源和时区，卸载代理不关闭系统校时。需允许访问时间源的出站 UDP 123，客户端也须开启自动校时。
 - 配置：`/etc/ss-rust/config.json`；状态：`systemctl status ss-rust`。
 - 日志：`journalctl -u ss-rust -n 50 --no-pager`。
 - 修改时留空保留当前值；切换算法后密钥留空重新生成，输入 `random` 也会生成新密钥。更改后重新导入客户端。

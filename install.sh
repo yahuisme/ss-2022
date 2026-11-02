@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.10.28"
+readonly SCRIPT_VERSION="26.11.02"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -487,6 +487,79 @@ detect_os() {
     else
         error "不支持的操作系统。支持的系统: Ubuntu, Debian, CentOS"
     fi
+}
+
+# 复用已有时间服务；缺省安装 chrony，不覆盖发行版或云厂商的时间源配置。
+enable_time_sync() {
+    check_systemd
+    local os_type unit candidate state id line seen attempt synchronized=false
+    local -a available=()
+    os_type=$(detect_os) || error "检测系统失败。"
+    for candidate in chrony chronyd systemd-timesyncd ntp ntpd ntpsec; do
+        state=$(systemctl show "$candidate" --property=LoadState --property=Id 2>/dev/null) ||
+            error "读取时间同步服务状态失败: $candidate"
+        id=""
+        seen=false
+        while IFS= read -r line; do
+            case "$line" in
+                Id=*) id=${line#Id=}; id=${id%.service} ;;
+                LoadState=loaded) seen=true ;;
+            esac
+        done <<< "$state"
+        [[ "$seen" == true ]] || continue
+        [[ -n "$id" ]] || error "无法识别时间同步服务: $candidate"
+        for unit in "${available[@]}"; do
+            [[ "$unit" != "$id" ]] || { id=""; break; }
+        done
+        [[ -z "$id" ]] || available+=("$id")
+    done
+    unit=""
+    for candidate in "${available[@]}"; do
+        if systemctl is-active --quiet "$candidate"; then
+            [[ -z "$unit" ]] || error "多个时间同步服务正在运行，请先处理冲突。"
+            unit="$candidate"
+        fi
+    done
+    if [[ -z "$unit" ]]; then
+        for candidate in "${available[@]}"; do
+            if systemctl is-enabled --quiet "$candidate"; then
+                unit="$candidate"
+                break
+            fi
+        done
+        unit=${unit:-${available[0]:-}}
+    fi
+    if [[ -z "$unit" ]]; then
+        info "正在安装 chrony 时间同步服务..."
+        install_dependencies "$os_type" chrony || error "安装 chrony 失败。"
+        if [[ "$os_type" == centos ]]; then unit=chronyd; else unit=chrony; fi
+    fi
+    info "正在开启自动时间同步: $unit"
+    systemctl enable "$unit" || error "开启自动时间同步失败。"
+    systemctl start "$unit" || error "启动时间同步服务失败。"
+    systemctl is-active --quiet "$unit" || error "时间同步服务未运行。"
+    info "正在等待时间同步，最多约 60 秒..."
+    case "$unit" in
+        chrony|chronyd)
+            command -v chronyc >/dev/null 2>&1 || error "未找到 chronyc，无法核验同步结果。"
+            chronyc waitsync 60 1 0 1 || error "时间尚未同步，请检查时间源及出站 UDP 123 后重试。"
+            ;;
+        *)
+            for ((attempt=0; attempt<60; attempt++)); do
+                if ! state=$(timedatectl show --property=NTPSynchronized 2>/dev/null); then
+                    # systemd 219 没有 timedatectl show，使用固定英文状态输出。
+                    state=$(LC_ALL=C timedatectl status 2>/dev/null) || error "读取时间同步结果失败。"
+                fi
+                if [[ "$state" == NTPSynchronized=yes || "$state" =~ NTP[[:space:]]synchronized:[[:space:]]+yes ]]; then
+                    synchronized=true
+                    break
+                fi
+                sleep 1
+            done
+            [[ "$synchronized" == true ]] || error "时间尚未同步，请检查时间源及出站 UDP 123 后重试。"
+            ;;
+    esac
+    success "自动时间同步已开启，系统时间已同步。"
 }
 
 detect_arch() {
@@ -987,6 +1060,7 @@ install_flow() {
     fi
     os_type=$(detect_os) || error "检测系统失败。"
     check_dependencies "$os_type" || error "检查依赖失败。"
+    enable_time_sync || error "时间同步失败，已中止安装。"
     arch=$(detect_arch) || error "检测架构失败。"
     version=${version:-$(get_latest_version)} || error "获取版本失败。"
     # 网络、校验、解压和可执行性检查完成后，才快照并停用现有服务。
@@ -1298,11 +1372,12 @@ main_menu() {
         menu_item "$C_RED" "7." "停止服务"
         menu_item "$C_CYAN" "8." "重启服务"
         menu_item "$C_MAGENTA" "9." "查看服务状态"
+        menu_item "$C_CYAN" "10." "时间同步"
         draw_divider
         menu_item "$C_YELLOW" "0." "退出脚本"
         draw_divider
 
-        read -r -p "请输入您的选项 [0-9]: " choice < /dev/tty || { info "输入终止，退出脚本。"; exit 0; }
+        read -r -p "请输入您的选项 [0-10]: " choice < /dev/tty || { info "输入终止，退出脚本。"; exit 0; }
 
         case "$choice" in
             # 菜单操作在子 shell 中执行：内部 error() 只终止本次操作，不退出整个脚本。
@@ -1317,12 +1392,13 @@ main_menu() {
             7) ( trap 'on_exit' EXIT; manage_service "stop" ) || true ;;
             8) ( trap 'on_exit' EXIT; manage_service "restart" ) || true ;;
             9) ( trap 'on_exit' EXIT; manage_service "status" ) || true ;;
+            10) ( trap 'on_exit' EXIT; enable_time_sync ) || true ;;
             0) 
                 info "感谢使用！"
                 exit 0 
                 ;;
             *) 
-                warn "无效的选项，请输入正确的数字 (0-9)。" 
+                warn "无效的选项，请输入正确的数字 (0-10)。"
                 ;;
         esac
 

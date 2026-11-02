@@ -54,7 +54,7 @@ sleep() { printf 'sleep %s\n' "$*" >> "$RUN/actions.log"; :; }
 apt-get() { printf 'FORBIDDEN apt\n' >&2; exit 99; }
 yum() { exit 99; }; curl() { exit 99; }; wget() { exit 99; }
 detect_os() { printf debian; }; detect_arch() { printf aarch64; }
-check_dependencies() { :; }; get_latest_version() { printf 2.0.0; }
+check_dependencies() { :; }; enable_time_sync() { printf 'time-sync\n' >> "$RUN/actions.log"; }; get_latest_version() { printf 2.0.0; }
 prepare_download() { printf 'prepare\n' >> "$RUN/actions.log"; [[ "$CASE" != download_failure ]]; }
 validate_version() { :; }; check_port_available() { :; }; view_config() { :; }
 download_and_install() {
