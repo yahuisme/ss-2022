@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.11.02"
+readonly SCRIPT_VERSION="26.11.14"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -78,6 +78,8 @@ restore_install_state() {
             return 1
         fi
     fi
+    # unit 停止不能证明外部同路径进程已退出；确认后才替换或删除安装文件。
+    stop_residual_processes || { warn "无法确认残留进程已停止，请手动恢复: $TMP_DIR"; return 1; }
     for name in binary version config service; do
         case "$name" in
             binary) target="$BINARY_PATH" ;;
@@ -1298,7 +1300,7 @@ generate_ss_url() {
 # shellcheck disable=SC2120
 view_config() {
     local ip_address="${1:-}"
-    local port password method node_name ss_link config_line
+    local port password method node_name ss_link config_line listen_address
     config_line=$(load_config) || return 1
     IFS=$'\t' read -r port password method <<< "$config_line"
     validate_existing_config_values "$port" "$password" "$method"
@@ -1307,6 +1309,11 @@ view_config() {
     [[ -n "$ip_address" ]] || ip_address=$(get_public_ip) || ip_address=""
     if [[ -n "$ip_address" && "$ip_address" == *:* && "$ip_address" != \[*\] ]]; then
         ip_address="[$ip_address]"
+    fi
+    listen_address=$(jq -r '.server // empty' "$CONFIG_PATH") || return 1
+    if [[ "$ip_address" == \[*\] ]] && validate_ipv4 "$listen_address"; then
+        warn "当前配置仅监听 IPv4，不能生成 IPv6 链接；请手动填写 IPv4 地址。"
+        ip_address=""
     fi
 
     {

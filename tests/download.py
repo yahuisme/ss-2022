@@ -21,6 +21,7 @@ class DownloadTests(unittest.TestCase):
 check_systemd() { :; }
 detect_os() { printf debian; }
 check_dependencies() { :; }
+enable_time_sync() { :; }
 detect_arch() { printf aarch64; }
 get_latest_version() { printf 1.25.0; }
 prepare_download() { printf 'prepare\n' >> calls; return 1; }
@@ -38,6 +39,7 @@ if (install_flow false '' '' "$DEFAULT_ENCRYPTION_METHOD" 1.25.0); then exit 80;
 check_systemd() { :; }
 detect_os() { printf debian; }
 check_dependencies() { :; }
+enable_time_sync() { :; }
 detect_arch() { printf aarch64; }
 prepare_download() { printf 'prepare\n' >> calls; }
 backup_install_state() { printf 'snapshot\n' >> calls; }

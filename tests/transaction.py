@@ -42,6 +42,16 @@ def orphan():
  assert not (r/'orphan').exists(),'uninstall left external ss-rust process running'
  assert '卸载完成' in p.stderr
 
+def rollback_orphans():
+ for case in ('rollback_orphan_missing_unit', 'rollback_orphan_existing_unit'):
+  r,p=run(case,fresh=case.endswith('missing_unit'))
+  assert (r/'tmp/KEEP').exists(),p.stderr
+  assert (r/'bin/ss-rust').read_text()=='NEW_BINARY\n'
+  assert (r/'orphan').exists()
+  assert (r/'kill.log').read_text()=='-TERM 4243\n'
+  if (r/'systemctl.log').exists():
+   assert 'restart ss-rust' not in (r/'systemctl.log').read_text()
+
 def dropin():
  r,p=run('dropin_uninstall',fresh=True,dropin=True)
  assert not (r/'system/ss-rust.service.d').exists(),'menu ignored drop-in-only residue'
@@ -113,6 +123,6 @@ def regressions():
  assert not (r/'orphan').exists()
 
 if __name__=='__main__':
- for name in (sys.argv[1:] or ['metadata','orphan','dropin','retained_units','stopped_stale_unit','stability','install_process_safety','regressions']):
+ for name in (sys.argv[1:] or ['metadata','orphan','rollback_orphans','dropin','retained_units','stopped_stale_unit','stability','install_process_safety','regressions']):
   globals()[name](); print('PASS',name)
  print('PASS',len(set(CASES)),'unique transaction scenarios')

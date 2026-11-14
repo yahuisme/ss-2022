@@ -176,6 +176,39 @@ if (check_port_available 8388); then {'true' if good else 'exit 80'}; else {'exi
   for value in [cfg+'\n'+cfg,'', '[]',cfg+'\nnull']:
    self.run_shell(['load_config'],f"mkdir -p \"$INSTALL_DIR\"; printf '%s' '{value}' > \"$CONFIG_PATH\"; if (load_config); then exit 80; fi")
   self.run_shell(['load_config'],f"mkdir -p \"$INSTALL_DIR\"; printf '%s' '{cfg}' > \"$CONFIG_PATH\"; load_config")
+ def test_ipv4_only_listener_does_not_export_ipv6_link(self):
+  for listener in ('0.0.0.0', '192.0.2.10'):
+   with self.subTest(listener=listener):
+    o=self.run_shell(['decode_base64','validate_password','validate_existing_password',
+                     'validate_port','get_key_bytes','validate_existing_config_values',
+                     'validate_ipv4','load_config','generate_ss_url','view_config'],r'''
+mkdir -p "$INSTALL_DIR"
+printf '%s' '{"server":"LISTENER","server_port":8388,"password":"AAAAAAAAAAAAAAAAAAAAAA==","method":"2022-blake3-aes-128-gcm","custom":true}' > "$CONFIG_PATH"
+cp "$CONFIG_PATH" expected
+get_public_ip() { printf '[2001:db8::1]'; }
+hostname() { printf test-node; }
+draw_divider() { :; }; cprintf() { printf "$@"; }
+warn() { printf '%s\n' "$*" >&2; }
+C_CYAN='' C_RESET='' C_YELLOW='' C_GREEN='' C_BLUE=''
+view_config
+cmp expected "$CONFIG_PATH"
+'''.replace('LISTENER',listener))
+    self.assertNotIn('ss://',o.stderr)
+    self.assertIn('IPv4',o.stderr)
+ def test_dual_stack_listener_still_exports_both_address_families(self):
+  for address in ('198.51.100.7', '[2001:db8::1]'):
+   with self.subTest(address=address):
+    o=self.run_shell(['decode_base64','validate_password','validate_existing_password',
+                     'validate_port','get_key_bytes','validate_existing_config_values',
+                     'validate_ipv4','load_config','generate_ss_url','view_config'],r'''
+mkdir -p "$INSTALL_DIR"
+printf '%s' '{"server":"::","server_port":8388,"password":"AAAAAAAAAAAAAAAAAAAAAA==","method":"2022-blake3-aes-128-gcm"}' > "$CONFIG_PATH"
+hostname() { printf test-node; }
+draw_divider() { :; }; cprintf() { printf "$@"; }
+C_CYAN='' C_RESET='' C_YELLOW='' C_GREEN='' C_BLUE=''
+view_config 'ADDRESS'
+'''.replace('ADDRESS',address))
+    self.assertIn('@'+address+':8388#',o.stderr)
  def test_url_is_aead2022_sip002(self):
   for method,size in [('2022-blake3-aes-128-gcm',16),('2022-blake3-chacha20-poly1305',32)]:
    k=base64.b64encode(bytes([251])*size).decode()

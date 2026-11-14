@@ -10,6 +10,6 @@ for name in names:
     assert m,name
     blocks.append(m.group())
 text='\n\n'.join(blocks)
-text=text.replace('/usr/local/bin', '${RUN}/bin').replace('/etc/systemd/system/ss-rust.service.d','${RUN}/system/ss-rust.service.d').replace('/run/ss-rust','${RUN}/runtime').replace('< /dev/tty','< "${RUN}/tty"')
+text=text.replace('/usr/local/bin', '${RUN}/bin').replace('/etc/systemd/system/ss-rust.service.d','${RUN}/system/ss-rust.service.d').replace('/run/ss-rust','${RUN}/runtime').replace('/proc/', '${RUN}/proc/').replace('< /dev/tty','< "${RUN}/tty"')
 (root/'actual-functions.sh').write_text(text+'\n')
 print(json.dumps({'functions':names,'source':str(root/'actual-functions.sh')},indent=2))

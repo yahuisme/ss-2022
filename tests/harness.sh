@@ -70,6 +70,15 @@ generate_config() { write_config 8388 AAAAAAAAAAAAAAAAAAAAAA== "$DEFAULT_ENCRYPT
 read() { if [[ "$*" == *' -p '* || "$*" == '-p '* ]]; then local dest="${!#}"; case "$dest" in method_choice|new_password_input) printf -v "$dest" '';; new_port) printf -v "$dest" '8390';; choice) printf -v "$dest" 'y';; *) return 99;; esac; else builtin read "$@"; fi; }
 CASE="$1"
 case "$CASE" in
+ rollback_orphan_missing_unit|rollback_orphan_existing_unit)
+ ( trap 'on_exit' EXIT
+   backup_install_state
+   printf 'NEW_BINARY\n' > "$BINARY_PATH"
+   mkdir -p "$RUN/proc/4243"
+   : > "$RUN/orphan"
+   CASE=kill_failure
+   error injected
+ ) || true ;;
  stale_unit_dropin)
  command rm -f "$BINARY_PATH"
  ( trap 'on_exit' EXIT; install_flow true 8388 AAAAAAAAAAAAAAAAAAAAAA== "$DEFAULT_ENCRYPTION_METHOD" 2.0.0 ) || true ;;

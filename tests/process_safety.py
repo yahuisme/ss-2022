@@ -14,6 +14,7 @@ SERVICE_START_ATTEMPTS=3; SERVICE_START_WAIT=0
 error() { exit "${2:-1}"; }; warn() { :; }; success() { :; }; info() { :; }
 systemctl() { return 99; }; pgrep() { return 99; }; kill() { exit 99; }; pkill() { exit 99; }; apt-get() { exit 99; }; sleep() { :; }; journalctl() { :; }
 readlink() { return 99; }
+stop_residual_processes() { :; }
 '''
    p=pathlib.Path(d)/'test.sh';p.write_text(setup+'\n'+'\n'.join(extract(n) for n in names)+'\n'+body)
    r=subprocess.run(['bash',str(p)],cwd=d,capture_output=True,text=True,timeout=10)
@@ -158,6 +159,23 @@ systemctl() { if [[ "$1" == show ]]; then if [[ -e "$RUN/seen" ]]; then printf '
 readlink() { printf '%s' "$BINARY_PATH"; }
 if (manage_service restart); then exit 80; else [[ $? == 1 ]]; fi
 [[ -f "$RUN/seen" ]]
+''')
+ def test_restore_checks_orphans_before_replacing_files(self):
+  for unit in ('missing', 'present'):
+   self.run_case(['ss_rust_pids', 'stop_residual_processes', 'restore_install_state'], 'UNIT=' + unit + '''
+mkdir -p "$TMP_DIR" "$INSTALL_DIR" "$RUN/proc/12"
+BACKUP_ACTIVE=true
+for n in binary version config service; do printf 'old-%s' "$n" > "$TMP_DIR/old-$n"; done
+for p in "$BINARY_PATH" "$VERSION_FILE" "$CONFIG_PATH"; do printf new > "$p"; done
+[[ "$UNIT" != present ]] || printf new-service > "$SYSTEMD_SERVICE_FILE"
+pgrep() { touch scanned; printf '12\\n'; }
+readlink() { printf '%s\\n' "$BINARY_PATH"; }
+kill() { touch term-attempted; return 1; }
+systemctl() { printf '%s\\n' "$*" >> service-calls; return 0; }
+if restore_install_state; then exit 80; fi
+[[ -f scanned && -f term-attempted ]]
+[[ $(cat "$BINARY_PATH") = new && $(cat "$CONFIG_PATH") = new ]]
+! grep -q restart service-calls 2>/dev/null
 ''')
  def test_restore_metadata_and_atomic_inode(self):
   self.run_case(['restore_install_state'],'''mkdir -p "$TMP_DIR" "$INSTALL_DIR"
