@@ -12,12 +12,13 @@ C_RESET=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_CYAN=''; C_MAGENTA='
 # Every mutable filesystem operand is constrained to this scratch case.
 guard_paths() { local a; for a in "$@"; do [[ "$a" != /* || "$a" == "$RUN/"* ]] || { printf 'UNSAFE PATH: %s\n' "$a" >&2; exit 99; }; done; }
 rm() { guard_paths "$@"; command rm "$@"; }
-cp() { guard_paths "$@"; if [[ ( "$CASE" == backup_failure && "$*" == *old-config* ) || ( "$CASE" == restore_failure && "$1" == -p && "$2" == "$TMP_DIR/old-config" ) ]]; then return 1; fi; command cp "$@"; }
+cp() { guard_paths "$@"; if [[ ( "$CASE" == backup_failure && "$*" == *old-config* ) || ( "$CASE" == restore_failure && "$2" == "$TMP_DIR/old-config" ) ]]; then return 1; fi; command cp "$@"; }
 install() { guard_paths "$@"; if [[ "$CASE" == restore_failure && "$*" == *old-config* ]]; then return 1; fi; command install "$@"; }
 mv() { guard_paths "$@"; command mv "$@"; }
 chmod() { guard_paths "$@"; command chmod "$@"; }
 chown() { guard_paths "$@"; command chown "$@"; }
 mkdir() { guard_paths "$@"; command mkdir "$@"; }
+rmdir() { guard_paths "$@"; command rmdir "$@"; }
 find() { guard_paths "$@"; command find "$@"; }
 mktemp() { guard_paths "$@"; command mktemp "$@"; }
 # No host services, processes, packages or network may be contacted.
@@ -37,7 +38,7 @@ systemctl() {
  disable) command rm -f "$RUN/enabled" ;;
  enable) : > "$RUN/enabled" ;;
  start|restart)
-   if [[ "$CASE" == restart_failure || "$CASE" == restore_failure || "$CASE" == modify_restart_failure || "$CASE" == mode_rollback ]]; then
+   if [[ "$CASE" == restart_failure || "$CASE" == fresh_restart_failure || "$CASE" == restore_failure || "$CASE" == modify_restart_failure || "$CASE" == mode_rollback || "$CASE" == linked_unit_rollback ]]; then
      if [[ ! -f "$RUN/restart-failed" ]]; then : > "$RUN/restart-failed"; command rm -f "$RUN/active"; return 1; fi
    fi
    : > "$RUN/active" ;;
@@ -67,7 +68,7 @@ download_and_install() {
 }
 generate_config() { write_config 8388 AAAAAAAAAAAAAAAAAAAAAA== "$DEFAULT_ENCRYPTION_METHOD"; }
 # Redirect only prompt reads; real TSV parsing still uses builtin read.
-read() { if [[ "$*" == *' -p '* || "$*" == '-p '* ]]; then local dest="${!#}"; case "$dest" in method_choice|new_password_input) printf -v "$dest" '';; new_port) printf -v "$dest" '8390';; choice) printf -v "$dest" 'y';; *) return 99;; esac; else builtin read "$@"; fi; }
+read() { if [[ "$*" == *' -p '* || "$*" == '-p '* ]]; then local dest="${!#}"; case "$dest" in method_choice|new_password_input) printf -v "$dest" '';; new_port) printf -v "$dest" '8390';; choice) printf -v "$dest" '%s' "${CONFIRM_REPLY:-y}";; *) return 99;; esac; else builtin read "$@"; fi; }
 CASE="$1"
 case "$CASE" in
  rollback_orphan_missing_unit|rollback_orphan_existing_unit)
@@ -97,15 +98,18 @@ case "$CASE" in
  ( trap 'on_exit' EXIT; install_flow true 8388 AAAAAAAAAAAAAAAAAAAAAA== "$DEFAULT_ENCRYPTION_METHOD" 2.0.0 ) || true ;;
  stopped_update)
  ( trap 'on_exit' EXIT; do_update ) || true ;;
- backup_failure|download_failure|restart_failure|restore_failure|mode_rollback)
+ backup_failure|download_failure|restart_failure|restore_failure|mode_rollback|linked_unit_rollback)
  ( trap 'on_exit' EXIT; install_flow false '' '' "$DEFAULT_ENCRYPTION_METHOD" 2.0.0 ) || true ;;
- fresh_success|stale_dropin_success)
+ fresh_success|fresh_restart_failure|stale_dropin_success)
  ( trap 'on_exit' EXIT; install_flow true 8388 AAAAAAAAAAAAAAAAAAAAAA== "$DEFAULT_ENCRYPTION_METHOD" 2.0.0 ) || true ;;
  fresh_stop_failure)
  ( trap 'on_exit' EXIT; backup_install_state; create_systemd_service; : > "$RUN/active"; error injected ) || true ;;
  modify_success|modify_restart_failure)
  ( trap 'on_exit' EXIT; do_modify_config ) || true ;;
  orphan_uninstall|dropin_uninstall|normal_uninstall|pgrep_failure|kill_failure|stubborn_process|foreign_process)
+ ( trap 'on_exit' EXIT; do_uninstall ) || true ;;
+invalid_uninstall_confirmation)
+ CONFIRM_REPLY=typo
  ( trap 'on_exit' EXIT; do_uninstall ) || true ;;
  orphan_cli_uninstall)
  ( trap 'on_exit' EXIT; run_uninstall_logic ) || true ;;

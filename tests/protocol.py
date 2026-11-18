@@ -47,6 +47,21 @@ stop_residual_processes() { :; }
 cleanup_uninstall_residue() { touch cleaned; }
 run_uninstall_logic
 ''')
+ def test_cli_committed_install_survives_display_failure(self):
+  o=self.run_shell(['main','get_key_bytes'],r'''
+check_root() { :; }; init_temp_dir() { :; }
+validate_port() { :; }; validate_password() { :; }
+has_installation_residue() { return 1; }
+install_flow() { printf '%s\n' "$1 $2 $4" > installed; }
+view_config() { error 'injected display error'; }
+success() { printf '%s\n' "$*" >&2; }
+warn() { printf '%s\n' "$*" >&2; }
+(main --port 65535 --password AAAAAAAAAAAAAAAAAAAAAA==) || exit $?
+[[ $(<installed) = 'true 65535 2022-blake3-aes-128-gcm' ]]
+''')
+  self.assertEqual(o.stdout,'')
+  self.assertIn('安装完成',o.stderr)
+  self.assertIn('无法显示',o.stderr)
  def test_fresh_cli_without_pgrep(self):
   self.run_shell(['has_installation_residue'],r'''
 command() { if [[ "$*" = '-v pgrep' ]]; then return 1; fi; builtin command "$@"; }

@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- 脚本配置与变量 ---
-readonly SCRIPT_VERSION="26.11.14"
+readonly SCRIPT_VERSION="26.11.19"
 readonly INSTALL_DIR="/etc/ss-rust"
 readonly BINARY_PATH="/usr/local/bin/ss-rust"
 readonly CONFIG_PATH="${INSTALL_DIR}/config.json"
@@ -73,7 +73,7 @@ restore_install_state() {
             warn "无法停止服务，请手动恢复: $TMP_DIR"
             return 1
         fi
-        if [[ ! -f "${TMP_DIR}/old-service" ]] && ! systemctl disable ss-rust; then
+        if [[ ! -f "${TMP_DIR}/old-service" && ! -L "${TMP_DIR}/old-service" ]] && ! systemctl disable ss-rust; then
             warn "无法禁用新服务，请手动恢复: $TMP_DIR"
             return 1
         fi
@@ -87,10 +87,10 @@ restore_install_state() {
             config) target="$CONFIG_PATH" ;;
             service) target="$SYSTEMD_SERVICE_FILE" ;;
         esac
-        if [[ -f "${TMP_DIR}/old-$name" ]]; then
+        if [[ -f "${TMP_DIR}/old-$name" || -L "${TMP_DIR}/old-$name" ]]; then
             # 同目录暂存并原子替换，保留快照权限/属主/时间，不覆盖运行中的 inode。
             staged=$(mktemp "${target}.restore.XXXXXX") || { failed=true; continue; }
-            if ! cp -p "${TMP_DIR}/old-$name" "$staged" || ! mv -f "$staged" "$target"; then
+            if ! cp -pP "${TMP_DIR}/old-$name" "$staged" || ! mv -fT "$staged" "$target"; then
                 rm -f "$staged" || true
                 failed=true
             fi
@@ -98,6 +98,9 @@ restore_install_state() {
             rm -f "$target" || failed=true
         fi
     done
+    if [[ -f "${TMP_DIR}/had-no-install-dir" && -d "$INSTALL_DIR" ]]; then
+        rmdir "$INSTALL_DIR" || failed=true
+    fi
     if command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload || failed=true
         if [[ -f "${TMP_DIR}/was-enabled-runtime" ]]; then
@@ -107,7 +110,7 @@ restore_install_state() {
         elif [[ -f "${TMP_DIR}/was-disabled" ]]; then
             systemctl disable ss-rust || failed=true
         fi
-        if [[ "$failed" = false && -f "${TMP_DIR}/old-service" ]]; then
+        if [[ "$failed" = false && ( -f "${TMP_DIR}/old-service" || -L "${TMP_DIR}/old-service" ) ]]; then
             if [[ -f "${TMP_DIR}/was-active" ]]; then
                 systemctl restart ss-rust && systemctl is-active --quiet ss-rust || failed=true
             else
@@ -146,11 +149,15 @@ backup_install_state() {
         error "有未恢复的备份，请先处理: $TMP_DIR"
     fi
     mkdir -p "$TMP_DIR" || error "创建临时目录失败。"
-    rm -f "${TMP_DIR}/old-"{binary,version,config,service} "${TMP_DIR}/was-"{active,enabled,enabled-runtime,disabled} || error "清理旧快照失败。"
-    if [[ -f "$BINARY_PATH" ]]; then cp -p "$BINARY_PATH" "${TMP_DIR}/old-binary" || error "备份旧程序失败，已中止操作。"; fi
-    if [[ -f "$VERSION_FILE" ]]; then cp -p "$VERSION_FILE" "${TMP_DIR}/old-version" || error "备份版本文件失败，已中止操作。"; fi
-    if [[ -f "$CONFIG_PATH" ]]; then cp -p "$CONFIG_PATH" "${TMP_DIR}/old-config" || error "备份配置文件失败，已中止操作。"; fi
-    if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then cp -p "$SYSTEMD_SERVICE_FILE" "${TMP_DIR}/old-service" || error "备份服务文件失败，已中止操作。"; fi
+    rm -f "${TMP_DIR}/old-"{binary,version,config,service} "${TMP_DIR}/was-"{active,enabled,enabled-runtime,disabled} \
+        "${TMP_DIR}/had-no-install-dir" || error "清理旧快照失败。"
+    if [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]]; then
+        : > "${TMP_DIR}/had-no-install-dir" || error "保存安装目录状态失败。"
+    fi
+    if [[ -f "$BINARY_PATH" || -L "$BINARY_PATH" ]]; then cp -pP "$BINARY_PATH" "${TMP_DIR}/old-binary" || error "备份旧程序失败，已中止操作。"; fi
+    if [[ -f "$VERSION_FILE" || -L "$VERSION_FILE" ]]; then cp -pP "$VERSION_FILE" "${TMP_DIR}/old-version" || error "备份版本文件失败，已中止操作。"; fi
+    if [[ -f "$CONFIG_PATH" || -L "$CONFIG_PATH" ]]; then cp -pP "$CONFIG_PATH" "${TMP_DIR}/old-config" || error "备份配置文件失败，已中止操作。"; fi
+    if [[ -f "$SYSTEMD_SERVICE_FILE" || -L "$SYSTEMD_SERVICE_FILE" ]]; then cp -pP "$SYSTEMD_SERVICE_FILE" "${TMP_DIR}/old-service" || error "备份服务文件失败，已中止操作。"; fi
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet ss-rust 2>/dev/null; then
         : > "${TMP_DIR}/was-active" || error "保存服务状态失败。"
     fi
@@ -520,6 +527,8 @@ enable_time_sync() {
         if systemctl is-active --quiet "$candidate"; then
             [[ -z "$unit" ]] || error "多个时间同步服务正在运行，请先处理冲突。"
             unit="$candidate"
+        elif [[ $? -ne 3 ]]; then
+            error "读取时间同步服务运行状态失败: $candidate"
         fi
     done
     if [[ -z "$unit" ]]; then
@@ -696,9 +705,10 @@ prepare_download() {
     if [[ ! -s "$download_path" ]]; then
         error "下载的文件无效或为空。"
     fi
-    # 提取校验和：取首行首个字段（read 原生处理，兼容所有 awk 方言与 CRLF）
-    local checksum
-    read -r checksum _ < "$checksum_path" || error "下载的校验文件无效或为空。"
+    # 取首行首个字段，兼容 CRLF 和没有末尾换行的摘要。
+    local checksum=''
+    IFS=$' \t\r' read -r checksum _ < "$checksum_path" || [[ -n "$checksum" ]] ||
+        error "下载的校验文件无效或为空。"
     if [[ ! "$checksum" =~ ^[0-9A-Fa-f]{64}$ ]]; then
         error "下载的校验文件无效或为空。"
     fi
@@ -769,16 +779,13 @@ write_config() {
         --argjson server_port "$port" \
         --arg password "$password" \
         --arg method "$method" \
-        'if . == null then {
+        '(if . == null then {
             "server": "::",
-            "server_port": $server_port,
-            "password": $password,
-            "method": $method,
             "fast_open": false,
             "mode": "tcp_and_udp",
             "timeout": 300,
             "no_delay": true
-        } elif type == "object" then . else error("invalid config") end
+        } elif type == "object" then . else error("invalid config") end)
         | .server_port = $server_port | .password = $password | .method = $method' \
         "$source" > "$tmp_config" || ! chmod 644 "$tmp_config" ||
         ! chown root:root "$tmp_config" || ! mv -f "$tmp_config" "$CONFIG_PATH"; then
@@ -846,10 +853,8 @@ generate_config() {
         done
     else
         info "使用指定的密码。"
-        validate_password "$password" "$key_bytes"
     fi
-    
-    validate_config_values "$port" "$password" "$method"
+    validate_password "$password" "$key_bytes"
 
     # 写入新配置
     write_config "$port" "$password" "$method" || error "写入配置失败。"
@@ -886,7 +891,7 @@ EOF
     if ! systemctl daemon-reload; then
         error "systemd daemon-reload 失败。"
     fi
-    if [[ ! -f "${TMP_DIR}/old-service" ]]; then
+    if [[ ! -f "${TMP_DIR}/old-service" && ! -L "${TMP_DIR}/old-service" ]]; then
         systemctl enable ss-rust || error "ss-rust 服务设置开机自启失败。"
         success "Systemd 服务已创建并设为开机自启。"
     else
@@ -916,7 +921,6 @@ manage_service() {
         start|stop|restart)
             info "正在执行: systemctl $1 ss-rust"
             if systemctl "$1" ss-rust; then
-                success "$1 命令执行成功"
                 if [[ "$1" == "start" || "$1" == "restart" ]]; then
                     local attempt pid='' observed_pid stable=false
                     for ((attempt=1; attempt<=SERVICE_START_ATTEMPTS; attempt++)); do
@@ -943,6 +947,8 @@ manage_service() {
                         journalctl -u ss-rust --no-pager -n 20 >&2 || true
                         return 1
                     fi
+                else
+                    success "服务已停止。"
                 fi
             else
                 error "$1 命令执行失败"
@@ -1056,6 +1062,9 @@ install_flow() {
     local os_type arch
 
     check_systemd
+    if [[ -L "$SYSTEMD_SERVICE_FILE" && ! -f "$SYSTEMD_SERVICE_FILE" ]]; then
+        error "服务 unit 是已屏蔽或失效的符号链接，请先手动处理。"
+    fi
     # 重建 unit 时不继承未纳入快照的用户覆盖；已有完整安装继续保留原 unit/drop-in。
     if [[ ( ! -f "$SYSTEMD_SERVICE_FILE" || ! -f "$BINARY_PATH" ) && -d "${SYSTEMD_SERVICE_FILE}.d" ]]; then
         error "检测到残留的 systemd drop-in，请先备份并卸载或手动处理后重试。"
@@ -1095,7 +1104,7 @@ install_flow() {
     if [[ ! -f "$SYSTEMD_SERVICE_FILE" ]]; then
         create_systemd_service || error "创建服务失败。"
     fi
-    if [[ ! -f "${TMP_DIR}/old-service" || -f "${TMP_DIR}/was-active" ]]; then
+    if [[ ( ! -f "${TMP_DIR}/old-service" && ! -L "${TMP_DIR}/old-service" ) || -f "${TMP_DIR}/was-active" ]]; then
         manage_service "restart" || error "启动服务失败。"
     else
         info "服务在操作前处于停止状态，完成后保持停止。"
@@ -1128,7 +1137,7 @@ do_install() {
     fi
 
     success "安装完成；已有服务保留原运行状态。"
-    view_config
+    ( view_config ) || warn "安装已完成，但无法显示配置；可稍后从菜单查看。"
 }
 
 do_update() {
@@ -1164,7 +1173,7 @@ do_uninstall() {
 
     warn "将删除程序、服务及全部配置；恢复目录不自动删除。"
     read -r -p " -> 确认卸载 shadowsocks-rust? (Y/n，回车确认): " choice < /dev/tty || error "输入已终止。"
-    if [[ "$choice" =~ ^[Nn]$ ]]; then
+    if [[ -n "$choice" && ! "$choice" =~ ^[Yy]$ ]]; then
         info "已取消卸载操作。"
         return
     fi
@@ -1280,7 +1289,7 @@ do_modify_config() {
     INSTALL_COMMITTED=true
     
     success "配置修改成功！"
-    view_config
+    ( view_config ) || warn "配置已修改，但无法显示；可稍后从菜单查看。"
 }
 
 generate_ss_url() {
@@ -1518,8 +1527,8 @@ EOF
         info "开始检查依赖、下载并安装..."
         install_flow true "$ss_port" "$ss_password" "$ss_method" || error "安装失败。"
 
-        info "显示最终配置..."
-        view_config
+        success "安装完成。"
+        ( view_config ) || warn "安装已完成，但无法显示配置；可稍后从菜单查看。"
         exit 0
         
     elif [[ $argc -gt 0 ]]; then

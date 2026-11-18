@@ -40,7 +40,8 @@ systemctl() {
    [[ "$unit" != ntpsec ]] || unit=ntp
    printf 'LoadState=loaded\nId=%s.service\n' "$unit"
  else printf 'LoadState=not-found\nId=%s.service\n' "$unit"; fi ;;
- is-active) unit="${!#}"; [[ "$FAIL" != inactive && " $ACTIVE " == *" $unit "* ]] ;;
+ is-active) unit="${!#}"; [[ "$FAIL" != active-query ]] || return 1
+   [[ "$FAIL" != inactive && " $ACTIVE " == *" $unit "* ]] || return 3 ;;
  is-enabled) unit="${!#}"; [[ " $ENABLED " == *" $unit "* ]] ;;
  enable) unit="${!#}"; [[ "$FAIL" != enable ]] || return 1; [[ "$*" != *--now* || "$OS_TYPE" != centos ]] ;;
  start) unit="${!#}"; [[ "$FAIL" != start ]] || return 1; ACTIVE="$ACTIVE $unit" ;;
@@ -145,6 +146,13 @@ main_menu
         self.assertIn('多个时间同步服务', p.stdout)
         self.assertNotIn('enable', p.stderr)
         self.assertNotIn('PACKAGE', p.stdout)
+
+    def test_active_probe_error_cannot_select_another_daemon(self):
+        p = self.run_sync('chrony systemd-timesyncd', 'systemd-timesyncd', fail='active-query')
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('读取时间同步服务运行状态失败', p.stdout)
+        self.assertNotIn('SYSTEMCTL enable ', p.stderr)
+        self.assertNotIn('SYSTEMCTL start ', p.stderr)
 
     def test_failures_never_claim_success(self):
         for loaded, active, failure in [

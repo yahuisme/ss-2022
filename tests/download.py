@@ -91,7 +91,7 @@ if (download_and_install 1.25.0); then exit 80; fi
 ''')
 
     def test_prepared_archive_is_verified_before_use(self):
-        for fault in ('none', 'download', 'checksum', 'missing', 'unrunnable', 'wrong-version'):
+        for fault in ('none', 'no-newline', 'crlf', 'download', 'checksum', 'missing', 'unrunnable', 'wrong-version'):
             with self.subTest(fault=fault):
                 self.run_shell(['prepare_download'], 'FAULT=' + fault + r'''
 mkdir payload
@@ -105,13 +105,17 @@ tar -cJf payload.tar.xz -C payload .
 # Production assets have top-level names, not ./ prefixes.
 if [[ "$FAULT" != missing ]]; then tar -cJf payload.tar.xz -C payload ssserver; fi
 sha256sum payload.tar.xz > payload.sha256
+if [[ "$FAULT" = no-newline || "$FAULT" = crlf ]]; then
+    read -r digest _ < payload.sha256
+    if [[ "$FAULT" = no-newline ]]; then printf '%s' "$digest"; else printf '%s\r\n' "$digest"; fi > payload.sha256
+fi
 [[ "$FAULT" != checksum ]] || printf '%064d  payload.tar.xz\n' 0 > payload.sha256
 download_file() {
     [[ "$FAULT" != download ]] || return 1
     if [[ "$2" = *.sha256 ]]; then cp payload.sha256 "$1"; else cp payload.tar.xz "$1"; fi
 }
 PREPARED_BINARY=stale
-if [[ "$FAULT" = none ]]; then
+if [[ "$FAULT" = none || "$FAULT" = no-newline || "$FAULT" = crlf ]]; then
     prepare_download 1.25.0 aarch64-unknown-linux-musl
     [[ -x "$PREPARED_BINARY" && $("$PREPARED_BINARY" --version) = 'shadowsocks 1.25.0' ]]
 else

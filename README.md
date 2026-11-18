@@ -1,6 +1,6 @@
 # ss-2022
 
-基于 [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) 的 Shadowsocks 2022 一键安装与管理脚本。
+基于 [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) 的 Shadowsocks 2022 一键安装与管理脚本（v26.11.19）。
 
 ## 使用
 

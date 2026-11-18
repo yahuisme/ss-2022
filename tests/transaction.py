@@ -22,6 +22,8 @@ def run(case, fresh=False, active=True, dropin=False, orphan=False):
  if dropin:
   d=r/'system/ss-rust.service.d'; d.mkdir(); (d/'override.conf').write_text('[Service]\nExecStart=/bin/true\n')
  if orphan: (r/'orphan').touch()
+ if case=='linked_unit_rollback':
+  unit=r/'system/ss-rust.service'; unit.rename(r/'system/custom.service'); unit.symlink_to('custom.service')
  p=subprocess.run(['bash',str(ROOT/'harness.sh'),case],text=True,capture_output=True,timeout=10)
  (r/'stdout.log').write_text(p.stdout); (r/'stderr.log').write_text(p.stderr)
  assert p.returncode==0,(case,p.returncode,p.stderr)
@@ -78,8 +80,24 @@ def stopped_stale_unit():
 
 def stability():
  r,p=run('transient_active')
- assert '服务运行正常' not in p.stderr,'transient active was reported healthy'
+ assert '[成功]' not in p.stderr,'transient active was reported as a successful restart'
  assert '服务启动失败' in p.stderr
+
+def fresh_restart_failure():
+ r,p=run('fresh_restart_failure',fresh=True)
+ assert (r/'restart-failed').exists() and '正在恢复原有安装' in p.stderr,p.stderr
+ assert not any((r/path).exists() for path in ('active','enabled','bin/ss-rust','config','system/ss-rust.service','tmp/KEEP'))
+
+def linked_unit_rollback():
+ r,p=run('linked_unit_rollback')
+ assert (r/'restart-failed').exists() and (r/'active').exists(),p.stderr
+ unit=r/'system/ss-rust.service'
+ assert unit.is_symlink() and unit.readlink().as_posix()=='custom.service','rollback replaced the administrator’s linked unit'
+
+def invalid_uninstall_confirmation():
+ r,p=run('invalid_uninstall_confirmation')
+ assert (r/'config/config.json').exists() and (r/'active').exists(),p.stderr
+ assert '卸载完成' not in p.stderr and not (r/'systemctl.log').exists(),p.stderr
 
 def install_process_safety():
  r,p=run('foreign_install',fresh=True,orphan=True)
@@ -123,6 +141,6 @@ def regressions():
  assert not (r/'orphan').exists()
 
 if __name__=='__main__':
- for name in (sys.argv[1:] or ['metadata','orphan','rollback_orphans','dropin','retained_units','stopped_stale_unit','stability','install_process_safety','regressions']):
+ for name in (sys.argv[1:] or ['metadata','orphan','rollback_orphans','dropin','retained_units','stopped_stale_unit','stability','fresh_restart_failure','linked_unit_rollback','invalid_uninstall_confirmation','install_process_safety','regressions']):
   globals()[name](); print('PASS',name)
  print('PASS',len(set(CASES)),'unique transaction scenarios')
